@@ -3,17 +3,22 @@
   <h1>SlateSync</h1>
   <p><strong>把声音时码拉回正轨，让声画合板更清楚。</strong></p>
   <p>Local-first LTC decoding, BWF timecode repair, and workflow-ready Poly WAV export.</p>
-  <p><a href="#快速开始">快速开始</a> · <a href="#命令行导出">命令行导出</a> · <a href="#验证与兼容性">验证与兼容性</a> · <a href="#english">English</a> · <a href="LICENSE">MIT License</a></p>
+  <p><a href="#单文件版">单文件即用</a> · <a href="#快速开始">快速开始</a> · <a href="#命令行导出">命令行导出</a> · <a href="#验证与兼容性">验证与兼容性</a> · <a href="#english">English</a> · <a href="LICENSE">MIT License</a></p>
 </div>
 
 ---
 
 **SlateSync** 是面向双系统录音、ZOOM H 系列分轨和后期声画同步的本地工具。它从音轨中读取 LTC，推算文件起始时间码，编辑 WAV/BWF 元数据，并把同一 take 的节目音轨打包为 Poly WAV。
 
-浏览器版使用原生 HTML/CSS/JavaScript，没有后端或 npm 构建步骤。文件解析、LTC 分析与导出在本机完成；命令行导出也只处理本地文件。
+浏览器版运行时使用原生 HTML/CSS/JavaScript，没有后端，也不需要安装任何依赖。只有可选的[单文件版](#单文件版)打包会在构建时用到 esbuild。文件解析、LTC 分析与导出都在本机完成；命令行导出也只处理本地文件。
 
-> **重要：`index.html` 不是独立可分发的单文件程序。**
-> 需要保留完整应用资源，并通过本地 HTTP 服务或 HTTPS 网站打开。只下载 HTML、或直接双击它，不是当前支持的运行方式。
+> **单文件即用**
+>
+> 从 [Releases](https://github.com/NkAntony777/slatesync/releases) 下载 `bwf-timecode-singlefile-*.html`，**双击即可在浏览器中运行**：不需要安装 Python、不需要启动本地服务器、不需要 npm。写回时码、合并 Poly 等功能全部保留，素材全程不离开本机。
+>
+> 自行构建：`npm install && npm run build:single -- --repo https://github.com/NkAntony777/slatesync`，详见[单文件版](#单文件版)。
+>
+> **注意区分**：仓库根目录的 `index.html` 本身**不是**单文件程序。它依赖完整 `src/`、Service Worker 与图标，需要通过本地 HTTP 服务或 HTTPS 打开；单文件能力来自上面的构建产物。
 >
 > **重要素材先备份。**“合并 Poly”生成新文件，但直接写回时码会修改源 WAV；静音源 LTC 通道后，撤销按钮不能恢复音频内容。
 
@@ -29,6 +34,7 @@
 | 工作流导出 | Resolve、Sidus、PluralEyes、Syncaila、Archive 文件策略；可选 mono SyncRef 与中文合板说明 |
 | 视频与元数据 | 读取支持的 MOV/MP4 时间码，导入/导出 CSV、ALE 元数据 |
 | PWA | 安装与离线缓存机制；成功在线加载并缓存后可离线运行 |
+| 单文件版 | 打包为一个自包含 HTML，双击即用、无需本地服务器；功能与网页版一致（不含 PWA 离线缓存） |
 
 支持的 WAV 解析路径包括 RIFF、RF64、BW64、PCM、IEEE Float 和 WAVEFORMATEXTENSIBLE。具体素材能否处理仍取决于格式与信号质量，不代表所有设备、视频编码或大文件都经过实测。
 
@@ -74,6 +80,41 @@ node test/gen-demo.mjs demo
 ```
 
 生成的 `demo/FOLDER01` 包含正常 LTC、延迟接入、无 LTC 和低电平 LTC 的演示 take。它们是合成测试信号，不是真实拍摄素材；生成文件不随源码仓库发布。
+
+## 单文件版
+
+`npm run build:single` 会把 `index.html`、34 个 ES 模块和整份 CSS 打包进**一个 HTML 文件**，双击即可运行，不需要本地 HTTP 服务。运行时零依赖，素材全程不离开本机。
+
+```bash
+npm install          # 仅构建需要 esbuild；打包产物本身无运行时依赖
+npm run build:single -- --repo https://github.com/NkAntony777/slatesync
+```
+
+产物位于 `dist/bwf-timecode-singlefile-v1.4.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
+
+单文件版**保留完整功能**，包括写回时码和合并 Poly：`file://` 在 Chrome / Edge 属于 secure context，File System Access API（`showSaveFilePicker` / `showDirectoryPicker`）可用，因此不需要为降级功能改代码。
+
+与 PWA 版的两点差异：
+
+- **不提供 PWA 离线缓存。** Service Worker 必须以同源独立脚本注册，无法内联进单文件；应用对该场景已有降级分支。
+- **输出方案仍只有 `resolve`。** 五种 Poly 方案的数据层与 CLI 均已就绪，但网页的选择控件尚未接入（见[命令行导出](#命令行导出)）。
+
+构建脚本保留 `<script type="module">` 与 ESM 输出格式，因为应用入口存在顶层 `await`；LTC Worker 本就从模板字符串经 Blob URL 创建，不需要额外文件。`app-version.js` 读取版本号的 `fetch` 由内联 shim 应答，因此版本号仍与仓库的 `CACHE_NAME` 同源。
+
+**验证范围（2026-10-05，Chromium on Windows，`file://` 打开）：**
+
+| 检查项 | 结果 |
+|---|---|
+| 内联 module 启动、整页零外部请求 | 通过 |
+| 版本号来自内联 shim | 通过（`v1.4.0`） |
+| File System Access API 可用 | 通过（不降级） |
+| 拖入演示素材、take 分组 | 通过 |
+| Blob URL Worker 解码 LTC 并回填 | 通过（`01:23:45:19`） |
+| 提取流程结束并报告结果 | 通过 |
+
+复现：`npm run build:single -- --repo <仓库地址>` 后执行 `node test/verify-single-file.mjs`。
+
+> **未覆盖**：真实点击触发的保存/写回操作（自动化只验证了 API 存在，未走完文件选择器）、Safari / Firefox、长时间漂移与真实拍摄素材。单文件版不改变任何解码或写入逻辑，但仍建议对重要素材先备份。
 
 ## 典型工作流
 
@@ -153,6 +194,7 @@ PCM24 方案不会重采样。Float 超过 0 dBFS 转定点可能削波，导出
 | 既有集成测试 | 26 项检查通过 | 合成信号、take 分组、诊断、Poly 输出等场景 |
 | DaVinci Resolve 20.3.3.10 / Windows | 20 项检查通过 | 合成素材导入与时码/波形同步，通道、起始时码和偏移验证 |
 | 浏览器与 PWA | Worker 解码、断网刷新通过 | 当前本地验证环境的脚本和缓存路径 |
+| 单文件版（`file://`，Chromium on Windows） | 11 项检查通过 | 内联启动、零外部请求、版本 shim、File System Access、take 分组、Blob Worker 解码、流程结束 |
 | Sidus / PluralEyes / Syncaila | **尚未软件端实测** | 仅提供文件策略和流程说明，不等于兼容认证 |
 
 Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原声、主 Poly 波形同步、Mono SyncRef 波形同步。
@@ -168,7 +210,7 @@ Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原
 | 源码 ZIP / Git clone | 完整目录 + 本地 HTTP 服务 | 可用 |
 | 静态网站 / GitHub Pages | 浏览器；初次加载需要网络 | 可部署，推送源码本身不等于已启用 Pages |
 | PWA 离线使用 | 先成功加载并缓存应用 | 已有机制；浏览器缓存仍可能被清理 |
-| 单个 HTML 双击运行 | 所有代码需另行打包并验证文件权限 | **当前不支持** |
+| 单个 HTML 双击运行 | 仅需该 HTML 文件，无需本地服务 | 可用；由 `npm run build:single` 生成，见[单文件版](#单文件版) |
 | 双击即用桌面/便携包 | 本地服务启动器或桌面封装 | **尚未提供** |
 
 静态部署需要至少保留 `index.html`、完整 `src/`、Service Worker、manifest 和图标，不能只上传 HTML。仓库包含 `.nojekyll`，可用于普通静态资源发布。
@@ -193,6 +235,14 @@ node test/run-tests.mjs
 
 Resolve 软件端验证额外需要安装并运行 Resolve、配置可用的 Python 脚本接口，视频样本生成需要 FFmpeg。详见 [Resolve 验证说明](scripts/resolve/README.md)。这些不是网页使用的前提。
 
+单文件版的构建与校验需要额外一步（校验脚本还需要本机安装 Playwright 与 Chrome/Edge）：
+
+```bash
+npm install
+npm run build:single -- --repo https://github.com/NkAntony777/slatesync
+node test/verify-single-file.mjs
+```
+
 ```text
 index.html                         网页入口与控制器组装
 src/
@@ -205,8 +255,9 @@ src/
   sync-workflow.js                 中文交付说明和通道清单
 scripts/
   export-sync-package.mjs          本地命令行导出
+  build-single-file.mjs            单文件 HTML 构建（需要 esbuild）
   resolve/                         Resolve 合成素材与 API 验证
-test/                              合成器、回归测试、集成检查
+test/                              合成器、回归测试、集成检查、单文件校验
 docs/                              合板指南、接入接口、验证摘要
 ```
 
@@ -222,7 +273,8 @@ SlateSync 基于 [xnpeter / Audio TC Change](https://github.com/xnpeter/Audio-TC
 
 **SlateSync** is a local-first toolkit for LTC decoding, WAV/BWF timecode repair, split-track grouping, and Poly WAV delivery. It includes signal diagnostics, analysis-only low-level gain, explicit channel selection, optional mono sync references, and readable workflow sidecars.
 
-- **Run the web app:** clone the complete repository, run `python -m http.server 8765 --bind 127.0.0.1`, then open `http://127.0.0.1:8765/` in Chrome or Edge. The HTML file is **not** a standalone distributable.
+- **Run as a single file:** download `bwf-timecode-singlefile-*.html` from Releases and double-click it. No Python, no local server, no npm. All features (timecode write-back, Poly export) are preserved, because `file://` is a secure context in Chrome/Edge. Build it yourself with `npm run build:single`.
+- **Run the web app:** clone the complete repository, run `python -m http.server 8765 --bind 127.0.0.1`, then open `http://127.0.0.1:8765/` in Chrome or Edge. The repository's `index.html` is **not** a standalone distributable — use the single-file build when you need one self-contained HTML file.
 - **Use export presets:** `node scripts/export-sync-package.mjs --help`. Advanced preset/channel controls are available through the CLI/data API, not yet as complete web UI controls.
 - **Validated:** synthetic-fixture import and timecode/waveform sync in DaVinci Resolve 20.3.3.10 on Windows. This is not certification for all footage or other applications.
 - **Protect your originals:** in-place metadata writes modify source WAVs; muting source LTC audio cannot be undone by the metadata undo button.
