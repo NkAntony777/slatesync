@@ -1,4 +1,5 @@
-import { normalizeLtcAnalysisSignal } from "./ltc-signal.js";
+import { LTC_TUNING, normalizeLtcAnalysisSignal } from "./ltc-signal.js";
+import { decodeLtcEdgesRobust } from "./ltc-robust.js";
 import { readAudioSample } from "./wave-audio.js";
 import {
   frameDigitsFor,
@@ -11,12 +12,102 @@ import {
   timecodeToFrames,
 } from "./timecode.js";
 
+const LTC_SYNC_WORDS = [
+  "0011111111111101",
+  "1011111111111100",
+];
+
+// Integer 16-bit keys for the sync words, closed under bit reversal so a single
+// membership test serves both polarities. This replaces the per-bit-offset
+// slice(80) + slice(16) + join("") that dominated chooseCandidate.
+const LTC_SYNC_KEYS = (() => {
+  const keys = new Set();
+  const toKey = word => {
+    let key = 0;
+    for (const char of word) key = ((key << 1) | (char === "1" ? 1 : 0)) & 0xffff;
+    return key;
+  };
+  const reverse16 = key => {
+    let out = 0;
+    for (let i = 0; i < 16; i++) { out = (out << 1) | (key & 1); key >>>= 1; }
+    return out;
+  };
+  for (const word of LTC_SYNC_WORDS) {
+    keys.add(toKey(word));
+    keys.add(reverse16(toKey(word)));
+  }
+  return keys;
+})();
+
+// Rolling 16-bit key per bit index: keys[i] holds bits[i-15..i] with bit i as LSB.
+function buildRollingSyncKeys(bits) {
+  const length = bits.length;
+  const keys = new Uint16Array(Math.max(0, length - 15));
+  let key = 0;
+  for (let i = 0; i < length; i++) {
+    key = ((key << 1) | (bits[i] ? 1 : 0)) & 0xffff;
+    if (i >= 15) keys[i - 15] = key;
+  }
+  return keys;
+}
+
+// Frame starts are only worth expanding where the sync word actually lands:
+// bits 64..80 for forward frames, bits 0..16 for reverse frames. The key set is
+// closed under bit reversal, so one membership test covers both polarities.
+function syncAnchoredStarts(bits) {
+  const starts = [];
+  const keys = buildRollingSyncKeys(bits);
+  for (let start = 0; start + 80 <= bits.length; start++) {
+    if (LTC_SYNC_KEYS.has(keys[start + 64]) || LTC_SYNC_KEYS.has(keys[start])) starts.push(start);
+  }
+  return starts;
+}
+
+// Clock-drift handling. A recorder whose clock differs from the nominal LTC rate
+// places frame k at roughly k*80*actualBitSamples instead of the nominal
+// spacing, so a lock taken late in a long file carries an error that grows with
+// the scan position. Windows are visited in file order, so a running weighted
+// mean of observed/expected bit-period ratio has a baseline that grows with
+// exactly the distance it has to correct -- a 12-frame run cannot see this.
+//
+// The estimate is quantisation-limited: edge positions carry +/-0.5 sample of
+// rounding, so the ratio's precision improves only as 1/sqrt(observations).
+// Correction therefore requires BOTH enough observations AND a correction large
+// enough to matter. Without the second gate a short scan "corrects" 20 samples
+// of encoder rounding noise into a real error, which is worse than no drift
+// handling at all.
+const DRIFT = {
+  deadband: 5e-4,      // 500 ppm below which a ratio is not distinguishable from rounding
+  max: 0.01,           // 10000 ppm: beyond this it is an fps mismatch, not clock drift
+  minWeight: 20000,    // half-bit observations before a correction is trusted (~125 frames)
+  maxJitter: 0.06,     // per-window periodicity spread; noisier windows do not vote
+  minCorrectionFrames: 0.25, // only correct when the shift exceeds a quarter frame
+};
+
+function createDriftTracker() {
+  return { weight: 0, ratio: 1 };
+}
+
+function observeDrift(tracker, observedHalfBitSamples, expectedHalfBitSamples, observedJitter, weight) {
+  if (!(observedHalfBitSamples > 0) || !(expectedHalfBitSamples > 0)) return;
+  if (observedJitter > DRIFT.maxJitter) return;
+  if (!(weight > 0)) return;
+  const ratio = observedHalfBitSamples / expectedHalfBitSamples;
+  if (!Number.isFinite(ratio) || Math.abs(ratio - 1) > DRIFT.max) return;
+  tracker.weight += weight;
+  tracker.ratio += (ratio - tracker.ratio) * (weight / tracker.weight);
+}
+
+function driftRatioFor(tracker) {
+  if (!tracker || tracker.weight < DRIFT.minWeight) return 1;
+  const delta = Math.abs(tracker.ratio - 1);
+  return delta < DRIFT.deadband || delta > DRIFT.max ? 1 : tracker.ratio;
+}
+
 export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsValue, fpsSelectLabel }) {
+  const T = LTC_TUNING;
   return {
-  syncWords: new Set([
-    "0011111111111101",
-    "1011111111111100",
-  ]),
+  syncWords: new Set(LTC_SYNC_WORDS),
 
   async readChannel(record, channelIndex, scanSeconds = 60) {
     const bytesPerSample = record.bitsPerSample / 8;
@@ -102,7 +193,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
     const highPassed = this.highPass(channel.data, sampleRate, highPassCutoff);
     const lowPassed = this.lowPass(highPassed, sampleRate, Math.min(lowPassCutoff, sampleRate * 0.45));
     const stats = this.channelStats(lowPassed);
-    const gain = Math.min(80, gainTarget / Math.max(stats.rms, 1e-6));
+    const gain = Math.min(T.analysis.conditioningGainCap, gainTarget / Math.max(stats.rms, T.analysis.rmsFloor));
     const norm = Math.tanh(drive);
     const data = new Float32Array(lowPassed.length);
     for (let i = 0; i < lowPassed.length; i++) {
@@ -181,15 +272,15 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
   },
 
   quickRejectChannel(channel, sampleRate) {
-    if (channel.peak < 0.035 || channel.p2p < 0.07) return { reject: true, reason: "level" };
+    if (channel.peak < T.peakFloor || channel.p2p < T.p2pFloor) return { reject: true, reason: "level" };
     const totalSamples = channel.data.length;
     if (totalSamples < sampleRate) return { reject: false, reason: "short" };
     const stats = this.channelStats(channel.data, 0, totalSamples);
-    if (stats.peak < 0.035 || stats.p2p < 0.07) return { reject: true, reason: "window-level" };
+    if (stats.peak < T.peakFloor || stats.p2p < T.p2pFloor) return { reject: true, reason: "window-level" };
     const center = (stats.max + stats.min) / 2;
-    const hysteresis = Math.max(stats.p2p * 0.06, stats.rms * 0.14, 0.004);
-    const minHalf = sampleRate / (120 * 80 * 2) * 0.45;
-    const maxHalf = sampleRate / (23.976 * 80 * 2) * 2.4;
+    const hysteresis = Math.max(stats.p2p * T.hysteresis.p2p, stats.rms * T.hysteresis.rms, T.hysteresis.floor);
+    const minHalf = sampleRate / (T.maxFps * 80 * 2) * T.minHalfScale;
+    const maxHalf = sampleRate / (T.minFps * 80 * 2) * T.maxHalfScale;
     const windowSamples = sampleRate * 2;
     const hopSamples = sampleRate;
     const bucketCount = Math.max(1, Math.ceil(Math.max(1, totalSamples - windowSamples) / hopSamples) + 1);
@@ -227,8 +318,8 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
         bestIntervals = windowIntervals;
       }
     }
-    if (bestIntervals < 800) return { reject: true, reason: "few-ltc-edges" };
-    if (bestPlausible < 700 || bestPlausible / Math.max(1, bestIntervals) < 0.72) {
+    if (bestIntervals < T.edgeIntervalMin) return { reject: true, reason: "few-ltc-edges" };
+    if (bestPlausible < T.edgePlausibleMin || bestPlausible / Math.max(1, bestIntervals) < T.edgePlausibleRatio) {
       return { reject: true, reason: "aperiodic" };
     }
     return { reject: false, reason: "plausible", edges: bestPlausible };
@@ -238,11 +329,11 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
     let best = null;
     for (const window of this.channelWindows(channel, sampleRate)) {
       const stats = window;
-      if (stats.peak < 0.035 || stats.p2p < 0.07) continue;
+      if (stats.peak < T.peakFloor || stats.p2p < T.p2pFloor) continue;
       const center = (stats.max + stats.min) / 2;
-      const hysteresis = Math.max(stats.p2p * 0.06, stats.rms * 0.14, 0.004);
-      const minHalf = sampleRate / (120 * 80 * 2) * 0.45;
-      const maxHalf = sampleRate / (23.976 * 80 * 2) * 2.4;
+      const hysteresis = Math.max(stats.p2p * T.hysteresis.p2p, stats.rms * T.hysteresis.rms, T.hysteresis.floor);
+      const minHalf = sampleRate / (T.maxFps * 80 * 2) * T.minHalfScale;
+      const maxHalf = sampleRate / (T.minFps * 80 * 2) * T.maxHalfScale;
       const intervals = [];
       let state = window.data[0] >= center ? 1 : -1;
       let lastEdge = null;
@@ -299,9 +390,9 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
   },
 
   findEdges(channel, expectedHalfBitSamples) {
-    if (channel.peak < 0.035 || channel.p2p < 0.07) return [];
+    if (channel.peak < T.peakFloor || channel.p2p < T.p2pFloor) return [];
     const center = (channel.max + channel.min) / 2;
-    const hysteresis = Math.max(channel.p2p * 0.08, channel.rms * 0.18, 0.006);
+    const hysteresis = Math.max(channel.p2p * T.hysteresis.p2p, channel.rms * T.hysteresis.rms, T.hysteresis.floor);
     const minEdgeDistance = Math.max(2, expectedHalfBitSamples * 0.35);
     const baseSample = channel.baseSample || 0;
     const edges = [];
@@ -327,52 +418,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
   },
 
   decodeBits(edges, expectedHalfBitSamples) {
-    const bits = [];
-    const bitStarts = [];
-    const bitEnds = [];
-    let half = expectedHalfBitSamples;
-    let rejected = 0;
-    const observedHalves = [];
-
-    for (let i = 0; i < edges.length - 1;) {
-      const interval = edges[i + 1] - edges[i];
-      const units = interval / half;
-
-      if (units > 0.55 && units < 1.45 && i + 2 < edges.length) {
-        const nextInterval = edges[i + 2] - edges[i + 1];
-        const nextUnits = nextInterval / half;
-        if (nextUnits > 0.55 && nextUnits < 1.45) {
-          bits.push(1);
-          bitStarts.push(edges[i]);
-          bitEnds.push(edges[i + 2]);
-          observedHalves.push(interval, nextInterval);
-          half = half * 0.85 + ((interval + nextInterval) / 2) * 0.15;
-          i += 2;
-          continue;
-        }
-      }
-
-      if (units > 1.45 && units < 2.7) {
-        bits.push(0);
-        bitStarts.push(edges[i]);
-        bitEnds.push(edges[i + 1]);
-        observedHalves.push(interval / 2);
-        half = half * 0.9 + (interval / 2) * 0.1;
-        i += 1;
-        continue;
-      }
-
-      rejected++;
-      i += 1;
-    }
-
-    const observedMean = observedHalves.length
-      ? observedHalves.reduce((sum, value) => sum + value, 0) / observedHalves.length
-      : half;
-    const observedJitter = observedHalves.length
-      ? Math.sqrt(observedHalves.reduce((sum, value) => sum + (value - observedMean) ** 2, 0) / observedHalves.length) / Math.max(observedMean, 1)
-      : 1;
-    return { bits, bitStarts, bitEnds, rejected, trackedHalfBitSamples: half, observedHalfBitSamples: observedMean, observedJitter };
+    return decodeLtcEdgesRobust(edges, expectedHalfBitSamples);
   },
 
   decodeSoftGrid(channel, bitSamples, phase, radius) {
@@ -481,13 +527,13 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           penalty += margins[i] || 0;
         }
       }
-      const score = errors * 0.65 + penalty;
+      const score = errors * T.soft.syncErrorWeight + penalty;
       if (!best || score < best.score) best = { errors, penalty, score };
     }
     if (!best) return null;
     if (best.errors === 0) return { ...best, confidence: 1 };
-    if (best.errors <= 2 && best.penalty <= 1.25) {
-      return { ...best, confidence: Math.max(0, 1 - best.score / 4) };
+    if (best.errors <= T.soft.maxErrors && best.penalty <= T.soft.syncPenaltyMax) {
+      return { ...best, confidence: Math.max(0, 1 - best.score / T.soft.syncScoreScale) };
     }
     return null;
   },
@@ -557,7 +603,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
     const dropCost = bits[10] === Boolean(fps.drop) ? { cost: 0, errors: 0 } : { cost: margins[10] || 0, errors: 1 };
     const softDigitCost = ff.cost + ss.cost + mm.cost + hh.cost + dropCost.cost;
     const softDigitErrors = ff.errors + ss.errors + mm.errors + hh.errors + dropCost.errors;
-    if (softDigitCost > 2 || softDigitErrors > 5) return null;
+    if (softDigitCost > T.soft.digitCostMax || softDigitErrors > T.soft.digitErrorsMax) return null;
     const sep = timecodeSeparator(fps);
     const timecode = `${String(hh.value).padStart(2, "0")}:${String(mm.value).padStart(2, "0")}:${String(ss.value).padStart(2, "0")}${sep}${String(ff.value).padStart(frameDigitsFor(fps), "0")}`;
     try {
@@ -574,6 +620,12 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
   },
 
   chooseSoftSyncCandidate(channel, record, fps, stats, expectedHalfBitSamples, strictDrop = true) {
+    // 兜底路径的容错预算。依据 docs/LTC识别强化方案.md §4.1 的实测：对白干扰下
+    // 25 次锁定全部是错读，且连续帧数一律 ≤2；真正的锁定连续帧数 ≥3（多数 3~6）。
+    // 连续 3 帧时码递增 + 样本位置自洽，才能压住"随机模式撞出合法 BCD"的假锁定。
+    const SOFT_MIN_RUN_FRAMES = 3;
+    const SOFT_MIN_SUPPORT = 3;
+    const SOFT_CONFIRM_RUN_FRAMES = 6;
     const bitSamples = expectedHalfBitSamples * 2;
     const radius = Math.max(1, Math.floor(expectedHalfBitSamples * 0.35));
     const candidates = [];
@@ -592,7 +644,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
         );
         const frameMargins = decoded.margins.slice(start, start + 80);
         const softMargin = frameMargins.reduce((sum, value) => sum + value, 0) / Math.max(1, frameMargins.length);
-        if (softMargin < 0.62) continue;
+        if (softMargin < T.soft.frameMarginMin) continue;
         frames.push({
           ...frame,
           sampleOffset,
@@ -605,7 +657,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           newTimeReference,
           softMargin,
           measuredHalfBitSamples: expectedHalfBitSamples,
-          halfBitError: 0.006,
+          halfBitError: T.halfBitError.halfScoreSpan,
           rejectRatio: 0,
           observedJitter: 0,
         });
@@ -623,7 +675,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           if (Math.abs(next.sampleOffset - expectedSample) > Math.max(8, bitSamples * 0.75)) break;
           run.push(next);
         }
-        if (run.length < 2) continue;
+        if (run.length < SOFT_MIN_RUN_FRAMES) continue;
         const last = run[run.length - 1];
         const sampleOffset = Math.max(0, Math.round(first.sampleStart || 0));
         const newTimeReference = normalizeTimeReference(
@@ -654,9 +706,9 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
         absBigInt(item.newTimeReference - candidate.newTimeReference) <= 4n
       );
       const runFrames = candidate.softRunFrames || 1;
-      if (runFrames < 2 && cluster.length < 4) continue;
+      if (runFrames < SOFT_MIN_RUN_FRAMES || cluster.length < SOFT_MIN_SUPPORT) continue;
       const clusterMargin = cluster.reduce((sum, item) => sum + item.softMargin, 0) / cluster.length;
-      if (clusterMargin < (runFrames >= 2 ? 0.64 : 0.72)) continue;
+      if (clusterMargin < 0.64) continue;
       const frameConfidence = cluster.reduce((sum, item) => sum + (item.softFrameConfidence || 0), 0) / cluster.length;
       const confidence = Math.max(0, Math.min(0.76,
         0.42 +
@@ -673,6 +725,8 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
         softSyncSupport: cluster.length,
         softSyncMargin: clusterMargin,
         softFrameConfidence: frameConfidence,
+        requiresConfirmation: true,
+        softConfirmOnly: runFrames < SOFT_CONFIRM_RUN_FRAMES,
         diagnostics: {
           peak: stats.peak,
           rms: stats.rms,
@@ -681,7 +735,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           rejectedEdges: 0,
           observedJitter: 0,
           measuredHalfBitSamples: expectedHalfBitSamples,
-          halfBitError: 0.006,
+          halfBitError: T.halfBitError.halfScoreSpan,
           rejectRatio: 0,
           softSyncSupport: cluster.length,
           softSyncMargin: clusterMargin,
@@ -758,53 +812,63 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
   },
 
   qualityFor(candidate) {
-    if (candidate.softSync && candidate.lockedFrames < 4) return { label: "低", rank: 1 };
-    if (candidate.confidence >= 0.82 && candidate.lockedFrames >= 6 && candidate.halfBitError <= 0.0025 && candidate.rejectRatio <= 0.08) {
-      return { label: "高", rank: 3 };
+    if (candidate.softSync && (candidate.softConfirmOnly || candidate.lockedFrames < T.quality.lowSoftFrames)) return { label: "低", rank: T.quality.lowRank };
+    if (candidate.confidence >= T.quality.highConfidence && candidate.lockedFrames >= T.quality.highFrames && candidate.halfBitError <= T.halfBitError.high && candidate.rejectRatio <= T.quality.highReject) {
+      return { label: "高", rank: T.quality.highRank };
     }
-    if (candidate.confidence >= 0.62 && candidate.lockedFrames >= 3 && candidate.halfBitError <= 0.008 && candidate.rejectRatio <= 0.2) {
-      return { label: "中", rank: 2 };
+    if (candidate.confidence >= T.quality.mediumConfidence && candidate.lockedFrames >= T.quality.mediumFrames && candidate.halfBitError <= T.halfBitError.medium && candidate.rejectRatio <= T.quality.mediumReject) {
+      return { label: "中", rank: T.quality.mediumRank };
     }
-    return { label: "低", rank: 1 };
+    return { label: "低", rank: T.quality.lowRank };
   },
 
   isHighQualityCandidate(candidate) {
-    return candidate?.qualityRank >= 3 &&
-      candidate.lockedFrames >= 6 &&
-      candidate.halfBitError <= 0.0025 &&
-      candidate.rejectRatio <= 0.08 &&
-      candidate.confidence >= 0.82;
+    return candidate?.qualityRank >= T.quality.highRank &&
+      candidate.lockedFrames >= T.quality.highFrames &&
+      candidate.halfBitError <= T.halfBitError.high &&
+      candidate.rejectRatio <= T.quality.highReject &&
+      candidate.confidence >= T.quality.highConfidence;
   },
 
   isDefinitiveCandidate(candidate) {
-    return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= 0.00025;
+    return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= T.halfBitError.definitive;
   },
 
   compareResults(a, b) {
     if ((b.qualityRank || 0) !== (a.qualityRank || 0)) return (b.qualityRank || 0) - (a.qualityRank || 0);
-    if (Math.abs((a.halfBitError || 1) - (b.halfBitError || 1)) > 0.00025) return (a.halfBitError || 1) - (b.halfBitError || 1);
+    if (Math.abs((a.halfBitError || 1) - (b.halfBitError || 1)) > T.halfBitError.definitive) return (a.halfBitError || 1) - (b.halfBitError || 1);
     if ((b.lockedFrames || 0) !== (a.lockedFrames || 0)) return (b.lockedFrames || 0) - (a.lockedFrames || 0);
     if ((b.confidence || 0) !== (a.confidence || 0)) return (b.confidence || 0) - (a.confidence || 0);
     if (Boolean(a.reverse) !== Boolean(b.reverse)) return Number(a.reverse) - Number(b.reverse);
     return (a.sampleOffset || 0) - (b.sampleOffset || 0);
   },
 
-  chooseCandidate(decoded, record, fps, stats, expectedHalfBitSamples, strictDrop = true) {
+  chooseCandidate(decoded, record, fps, stats, expectedHalfBitSamples, strictDrop = true, driftRatio = 1) {
+    const fpsValue = Number(fpsRate(fps).n) / Number(fpsRate(fps).d);
     let best = null;
-    for (let start = 0; start + 80 <= decoded.bits.length; start++) {
+    for (const start of syncAnchoredStarts(decoded.bits)) {
       for (const reverse of [false, true]) {
         const run = this.consecutiveRun(decoded, start, fps, reverse, strictDrop);
         if (run.length < 2) continue;
         const first = run[0];
         const last = run[run.length - 1];
-        const sampleOffset = Math.max(0, Math.round(first.sampleStart || 0));
+        // Drift-correct the file-start offset: with a constant clock offset the
+        // elapsed LTC frames to this position are sampleOffset / ratio, not
+        // sampleOffset. Only applied when the shift is both statistically
+        // supported and large enough to be worth the risk of moving a lock.
+        const rawSampleOffset = Math.max(0, Math.round(first.sampleStart || 0));
+        const samplesPerFrame = record.sampleRate / fpsValue;
+        const corrected = Math.max(0, Math.round(rawSampleOffset / driftRatio));
+        const sampleOffset = Math.abs(corrected - rawSampleOffset) >= samplesPerFrame * DRIFT.minCorrectionFrames
+          ? corrected
+          : rawSampleOffset;
         const tcSamples = framesToSamples(first.frames, record.sampleRate, fps);
         const newTimeReference = normalizeTimeReference(tcSamples - BigInt(sampleOffset), record.sampleRate);
         const measuredHalfBitSamples = (last.sampleEnd - first.sampleStart) / Math.max(1, run.length * 80 * 2);
         const halfBitError = Math.abs(measuredHalfBitSamples - expectedHalfBitSamples) / expectedHalfBitSamples;
         const rejectRatio = decoded.rejected / Math.max(1, decoded.rejected + decoded.bits.length);
         const lockScore = Math.min(1, run.length / 8);
-        const halfScore = Math.max(0, Math.min(1, 1 - halfBitError / 0.006));
+        const halfScore = Math.max(0, Math.min(1, 1 - halfBitError / T.halfBitError.halfScoreSpan));
         const consistencyScore = Math.max(0, Math.min(1, 1 - (decoded.observedJitter || 0) / 0.18));
         const edgeScore = Math.min(1, decoded.bits.length / 320);
         const levelScore = Math.min(1, stats.p2p / 0.6);
@@ -828,6 +892,8 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           halfBitError,
           rejectRatio,
           observedJitter: decoded.observedJitter,
+          driftRatio,
+          driftPpm: Math.round((driftRatio - 1) * 1e6),
           windowStart: stats.windowStart || 0,
           windowEnd: stats.windowEnd || stats.data?.length || 0,
           diagnostics: {
@@ -842,6 +908,8 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
             measuredHalfBitSamples,
             halfBitError,
             rejectRatio,
+            driftRatio,
+            driftPpm: Math.round((driftRatio - 1) * 1e6),
             windowStart: stats.windowStart || 0,
             windowEnd: stats.windowEnd || stats.data?.length || 0,
           },
@@ -862,17 +930,33 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
     return this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples);
   },
 
-  detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples = null, strictDrop = true, allowSoftSync = false) {
+  // Frame-rate independent work: signal conditioning and windowing depend only
+  // on the channel, so they are computed once per channel instead of once per
+  // candidate frame rate (which was up to 9x redundant full-signal filtering).
+  prepareChannelAnalysis(channel, sampleRate) {
+    return this.channelVariants(channel, sampleRate).map(variant => ({
+      variant,
+      windows: this.channelWindows(variant, sampleRate),
+    }));
+  },
+
+  detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples = null, strictDrop = true, allowSoftSync = false, prepared = null, driftTracker = null) {
     const fpsValue = Number(fpsRate(fps).n) / Number(fpsRate(fps).d);
     const halfBitSamples = expectedHalfBitSamples || record.sampleRate / (fpsValue * 80 * 2);
+    const tracker = driftTracker || createDriftTracker();
+    const preparedVariants = prepared || this.prepareChannelAnalysis(channel, record.sampleRate);
     let best = null;
-    for (const variant of this.channelVariants(channel, record.sampleRate)) {
-      for (const window of this.channelWindows(variant, record.sampleRate)) {
+    for (const { variant, windows } of preparedVariants) {
+      for (const window of windows) {
         const edges = this.findEdges(window, halfBitSamples);
         if (edges.length < 160) continue;
         const decoded = this.decodeBits(edges, halfBitSamples);
-        const candidate = this.chooseCandidate(decoded, record, fps, window, halfBitSamples, strictDrop);
+        // Fold this window into the running drift estimate. Windows arrive in
+        // file order, so the baseline behind the ratio grows with scan position.
+        observeDrift(tracker, decoded.observedHalfBitSamples, halfBitSamples, decoded.observedJitter, decoded.observedCount || 0);
+        const candidate = this.chooseCandidate(decoded, record, fps, window, halfBitSamples, strictDrop, driftRatioFor(tracker));
         if (!candidate) continue;
+        if (variant.conditioned && candidate.lockedFrames < 3) continue;
         candidate.conditioned = Boolean(variant.conditioned);
         candidate.conditionProfile = variant.conditionProfile || "raw";
         if (!best || this.compareResults(candidate, best) < 0) best = candidate;
@@ -884,15 +968,19 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
         };
       }
     }
+    // Soft fallback also runs on the conditioned variants: a low-level LTC track
+    // with interference is exactly the case the hard edge path cannot lock, and
+    // conditioning is what makes that case recoverable at all.
     if (!best && allowSoftSync) {
-      for (const variant of [{ ...channel, conditioned: false }]) {
-        for (const window of this.channelWindows(variant, record.sampleRate)) {
+      for (const { variant, windows } of preparedVariants) {
+        for (const window of windows) {
           const candidate = this.chooseSoftSyncCandidate(window, record, fps, window, halfBitSamples, strictDrop);
           if (!candidate) continue;
           candidate.conditioned = Boolean(variant.conditioned);
           candidate.conditionProfile = variant.conditionProfile || "raw";
           if (!best || this.compareResults(candidate, best) < 0) best = candidate;
         }
+        if (best && (best.lockedFrames || 0) >= 4) break;
       }
     }
     if (!best) return null;
@@ -969,15 +1057,17 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
         continue;
       }
       const candidateValues = this.fpsCandidatesForChannel(channel, record.sampleRate, preferredValue, values);
+      const prepared = this.prepareChannelAnalysis(channel, record.sampleRate);
+      const driftTracker = createDriftTracker();
       const resultsBefore = results.length;
       for (const value of candidateValues) {
         const fps = parseFps(value);
         const fpsValue = Number(fpsRate(fps).n) / Number(fpsRate(fps).d);
         const expectedHalfBitSamples = record.sampleRate / (fpsValue * 80 * 2);
-        let result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, true, allowSoftSync && value === preferredValue);
+        let result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, true, allowSoftSync && value === preferredValue, prepared, driftTracker);
         if (!result && value === preferredValue) {
           const retrySoftSync = allowSoftSync && Boolean(fps.drop);
-          result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, false, retrySoftSync);
+          result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, false, retrySoftSync, prepared, driftTracker);
           if (result) result.dropMismatch = result.drop !== Boolean(fps.drop);
         }
         if (result) {
@@ -1009,7 +1099,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
     results.sort((a, b) => {
       if (Boolean(a.dropMismatch) !== Boolean(b.dropMismatch)) return Number(a.dropMismatch) - Number(b.dropMismatch);
       if ((b.qualityRank || 0) !== (a.qualityRank || 0)) return (b.qualityRank || 0) - (a.qualityRank || 0);
-      if (Math.abs(a.halfBitError - b.halfBitError) > 0.00025) return a.halfBitError - b.halfBitError;
+      if (Math.abs(a.halfBitError - b.halfBitError) > T.halfBitError.definitive) return a.halfBitError - b.halfBitError;
       if (b.lockedFrames !== a.lockedFrames) return b.lockedFrames - a.lockedFrames;
       if (b.confidence !== a.confidence) return b.confidence - a.confidence;
       return Number(b.preferred) - Number(a.preferred);

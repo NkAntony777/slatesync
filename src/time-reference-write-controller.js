@@ -42,6 +42,7 @@ export function createTimeReferenceWriteController({
   recordFps,
   samplesToTimecode,
   confirmWriteChanges,
+  confirmSoftSyncWrite,
   setState,
   updateWriteProgress,
   log,
@@ -157,6 +158,14 @@ export function createTimeReferenceWriteController({
       .map(record => ({ record, ltc: ltcResults.get(recordKey(record)) }))
       .filter(item => item.ltc?.ok && !item.record._meta && !item.record._video && item.record.fileHandle?.createWritable);
     if (!writableItems.length) throw new Error("没有可写入的 LTC 识别结果");
+
+    // 兜底算法（软同步）结果不与普通结果合并确认：它们无法交叉验证，且实测出现过
+    // 读出错误时码的情况。必须先逐条看过要写入的具体时码。
+    const softItems = writableItems.filter(item => item.ltc?.requiresConfirmation);
+    if (softItems.length) {
+      const softOk = await confirmSoftSyncWrite(softItems);
+      if (!softOk) return;
+    }
 
     const muteLtc = shouldMuteLtc?.() !== false;
     const ok = await confirmWriteChanges(writableItems.length, muteLtc);

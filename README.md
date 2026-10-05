@@ -90,7 +90,7 @@ npm install          # 仅构建需要 esbuild；打包产物本身无运行时�
 npm run build:single -- --repo https://github.com/NkAntony777/slatesync
 ```
 
-产物位于 `dist/bwf-timecode-singlefile-v1.4.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
+产物位于 `dist/bwf-timecode-singlefile-v1.5.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
 
 单文件版**保留完整功能**，包括写回时码和合并 Poly：`file://` 在 Chrome / Edge 属于 secure context，File System Access API（`showSaveFilePicker` / `showDirectoryPicker`）可用，因此不需要为降级功能改代码。
 
@@ -101,12 +101,12 @@ npm run build:single -- --repo https://github.com/NkAntony777/slatesync
 
 构建脚本保留 `<script type="module">` 与 ESM 输出格式，因为应用入口存在顶层 `await`；LTC Worker 本就从模板字符串经 Blob URL 创建，不需要额外文件。`app-version.js` 读取版本号的 `fetch` 由内联 shim 应答，因此版本号仍与仓库的 `CACHE_NAME` 同源。
 
-**验证范围（2026-10-05，Chromium on Windows，`file://` 打开）：**
+**验证范围（2026-10-06，Chromium on Windows，`file://` 打开）：**
 
 | 检查项 | 结果 |
 |---|---|
 | 内联 module 启动、整页零外部请求 | 通过 |
-| 版本号来自内联 shim | 通过（`v1.4.0`） |
+| 版本号来自内联 shim | 通过（`v1.5.0`） |
 | File System Access API 可用 | 通过（不降级） |
 | 拖入演示素材、take 分组 | 通过 |
 | Blob URL Worker 解码 LTC 并回填 | 通过（`01:23:45:19`） |

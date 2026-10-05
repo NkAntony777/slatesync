@@ -3,7 +3,7 @@
  * 端到端校验单文件版：以 file:// 打开 dist/*.html，检查控制台无错误、应用启动成功、
  * 版本号来自内联 shim，并用 demo 素材真实跑一次 LTC 提取（含 Blob URL Worker）。
  *
- * 用法：node test/verify-single-file.mjs [dist/bwf-timecode-singlefile-v1.4.0.html]
+ * 用法：node test/verify-single-file.mjs [dist/bwf-timecode-singlefile-v1.5.0.html]
  */
 import { readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";

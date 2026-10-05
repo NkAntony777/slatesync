@@ -1,12 +1,14 @@
 {
   "name": "slatesync",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "LTC 合板助手 — 从录音轨 LTC 音频时码倒推起始时码，合并 Poly WAV 并写入 BWF/Resolve",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs",
+    "test:all": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs",
+    "bench": "node test/bench-ltc.mjs",
     "build:single": "node scripts/build-single-file.mjs",
     "verify:single": "node test/verify-single-file.mjs",
     "demo": "node test/gen-demo.mjs demo"

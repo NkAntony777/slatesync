@@ -89,10 +89,33 @@ export function createConfirmFlows({ showConfirmDialog, fpsSelectLabel }) {
     });
   }
 
+  function confirmSoftSyncWrite(items) {
+    const rows = items.slice(0, 8).map(item => {
+      const name = item.record?.name || "（未命名文件）";
+      const written = item.ltc?.startTimecode || "—";
+      const source = item.ltc?.sourceTimecode || "—";
+      const frames = item.ltc?.lockedFrames ?? 0;
+      return `${name}：写入 <strong>${written}</strong>（源帧 ${source}，连续 ${frames} 帧）`;
+    });
+    return showConfirmDialog({
+      title: "兜底模式结果需逐条核对",
+      danger: true,
+      confirmText: "我已核对，仍要写入",
+      copy: [
+        `以下 <strong>${items.length}</strong> 项来自兜底算法（软同步），无法与标准算法交叉验证。`,
+        ...rows,
+        items.length > 8 ? `还有 ${items.length - 8} 项…` : "",
+        "<strong>兜底算法实测曾出现读出错误时码的情况</strong>（对白干扰下错读率约 66%），因此不与普通结果合并确认。",
+        "请逐条核对上面的起始时码是否与素材一致；有任何一条对不上就取消，并先确认 LTC 声道选对了。"
+      ].filter(Boolean).join("<br>"),
+    });
+  }
+
   return {
     confirmCombinePoly,
     confirmLtcFpsMismatch,
     confirmMetadataFpsMismatch,
+    confirmSoftSyncWrite,
     confirmWriteChanges,
   };
 }

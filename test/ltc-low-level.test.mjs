@@ -11,6 +11,7 @@ import { normalizeLtcAnalysisSignal, ltcFailureSummary } from "../src/ltc-signal
 import { buildTakeDiagnostics } from "../src/ltc-diagnostics.js";
 
 const values=["23.976","24","25","29.97","29.97df","30"];
+const rand=state=>((state.v=(state.v*1664525+1013904223)>>>0)/4294967296)*2-1;
 const decoder=createLtcDecoder({readDataView,candidateFpsValues:()=>values,defaultFpsValue:()=>"25",fpsSelectLabel:value=>value});
 async function detectBoth(record, preferred="25", allowSoftSync=false) {
   const main=await decoder.detectAuto(record,parseFps(preferred),{allowSoftSync});
@@ -77,6 +78,61 @@ for(const kind of ["silence","voice","noise","sine","sub-quantization"]) {
   for(const auto of both) assert.equal(auto.best,null);
  });
 }
+
+test("fallback mode never returns a wrong timecode under interference",async()=>{
+ // P0 regression. docs/LTC识别强化方案.md §4.1 measured a 65.8% wrong-lock rate here
+ // (errors up to 809909 frames, ~33h). A refusal to lock is always acceptable;
+ // returning a wrong TimeReference is not.
+ const levels=[0.25,0.30,0.35,0.40,0.45,0.50,0.60];
+ let locks=0,wrong=0;
+ for(const seed of [1,2,3,5,8,13]) {
+  for(const voice of levels) {
+   const {data}=encodeLtcAudio({durationSeconds:3,amplitude:0.03});
+   const talk=encodeVoiceLike({durationSeconds:3,amplitude:voice});
+   let state=seed>>>0;
+   const rand=()=>((state=(state*1664525+1013904223)>>>0)/4294967296)*2-1;
+   for(let i=0;i<data.length;i++) data[i]+=talk[i]+0.02*rand();
+   const record=await audioRecord("stress.wav",[data]);
+   const auto=await decoder.detectAuto(record,parseFps("25"),{allowSoftSync:true});
+   if(!auto.best) continue;
+   locks++;
+   const errFrames=Number(BigInt(auto.best.newTimeReference)-172800000n)/1920;
+   if(Math.abs(errFrames)>1.01) { wrong++; assert.fail(`seed ${seed} voice ${voice}: read ${auto.best.timecode}, off by ${errFrames.toFixed(1)} frames`); }
+   assert.equal(auto.best.requiresConfirmation,true);
+  }
+ }
+ assert.equal(wrong,0);
+ assert.ok(locks>0,"stress matrix must still exercise at least one lock, otherwise this test is vacuous");
+});
+
+test("fallback mode still recovers runs that satisfy the strict grammar",async()=>{
+ // The tightened budget must not throw away corroborated locks: these need
+ // 3+ consecutive incrementing frames, which is what the 25 wrong locks never had.
+ const cases=[
+  {label:"white noise",ltc:0.05,seed:13,mix:(data,dur,state)=>{
+   for(let i=0;i<data.length;i++) data[i]+=0.10*rand(state);
+  }},
+  {label:"voice-like",ltc:0.03,seed:1,mix:(data,dur,state)=>{
+   const talk=encodeVoiceLike({durationSeconds:dur,amplitude:0.30});
+   for(let i=0;i<data.length;i++) data[i]+=talk[i];
+  }},
+ ];
+ for(const {label,ltc,seed,mix} of cases) {
+  const duration=4;
+  const {data}=encodeLtcAudio({durationSeconds:duration,amplitude:ltc});
+  const state={v:seed>>>0};
+  mix(data,duration,state);
+  const record=await audioRecord("recover.wav",[data]);
+  const both=await detectBoth(record,"25",true);
+  for(const auto of both) {
+   assert.ok(auto.best,`${label}: expected a fallback lock`);
+   assert.equal(auto.best.softSync,true,`${label}: should come from the fallback path`);
+   assert.ok(auto.best.lockedFrames>=3,`${label}: only ${auto.best.lockedFrames} locked frames`);
+   assert.equal(auto.best.requiresConfirmation,true);
+   assert.ok(Math.abs(Number(BigInt(auto.best.newTimeReference)-172800000n)/1920)<=1.01,`${label}: ${auto.best.timecode} is off`);
+  }
+ }
+});
 
 test("failure messages distinguish silence, low level, instability and read errors",()=>{
  assert.equal(ltcFailureSummary([{channelReports:[{peak:0}]}]).code,"silent");

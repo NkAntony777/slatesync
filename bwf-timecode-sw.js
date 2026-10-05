@@ -1,4 +1,4 @@
-const CACHE_NAME = "ltc-slate-helper-v1.4.0";
+const CACHE_NAME = "ltc-slate-helper-v1.5.0";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -6,6 +6,7 @@ const APP_ASSETS = [
   "./src/sync-workflow.js",
   "./src/poly-export-profiles.js",
   "./src/ltc-signal.js",
+  "./src/ltc-robust.js",
   "./src/calculator.js",
   "./src/confirm-flows.js",
   "./src/custom-select.js",

@@ -46,9 +46,11 @@ export function encodeLtcAudio({
   startDelaySeconds = 0,
   drop = false,
   nominalFps = null,
+  driftPpm = 0,
 }) {
   const nominal = nominalFps ?? Math.round(fps);
   const bitSamples = sampleRate / (fps * 80);
+  const frameStep = (80 * bitSamples) / (1 + driftPpm / 1e6);
   const totalSamples = Math.round(durationSeconds * sampleRate);
   const startSample = Math.round(startDelaySeconds * sampleRate);
   const data = new Float32Array(totalSamples);
@@ -76,7 +78,7 @@ export function encodeLtcAudio({
         if (i >= 0) data[i] = level * amplitude;
       }
     }
-    pos += 80 * bitSamples;
+    pos += frameStep;
     tc = { ...tc, ...incrementTc(tc) };
   }
   return { data, frameStarts, bitSamples };

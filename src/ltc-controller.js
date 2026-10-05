@@ -137,6 +137,7 @@ export function createLtcController({
       channelIndex: item.channelIndex,
       channelLabel: item.channelLabel,
       softSync: Boolean(item.softSync),
+      requiresConfirmation: Boolean(item.requiresConfirmation),
     });
     return {
       record,
@@ -151,13 +152,7 @@ export function createLtcController({
   }
 
   function isHighQualityFastLtc(auto) {
-    const best = auto?.best;
-    if (!best) return false;
-    return best.qualityRank >= 3 &&
-      best.lockedFrames >= 6 &&
-      best.halfBitError <= 0.0025 &&
-      best.rejectRatio <= 0.08 &&
-      best.confidence >= 0.82;
+    return decoder.isHighQualityCandidate(auto?.best);
   }
 
   function tagLtcAutoResult(auto, flags) {
@@ -477,9 +472,10 @@ export function createLtcController({
           return result.ok && record && !record._meta && !record._video && record.fileHandle?.createWritable;
         }).length;
         const lowQualityGroups = new Set(Array.from(ltcResults.values()).filter(result => result.ok && result.qualityRank === 1).map(result => result.groupKey));
+        const softGroups = new Set(Array.from(ltcResults.values()).filter(result => result.ok && result.requiresConfirmation).map(result => result.groupKey));
         setState(okGroups.size ? (writableOkFiles ? "LTC可写入" : "LTC可导出") : "未检测到LTC", okGroups.size ? "ok" : "warn");
         els.statusLine.textContent = okGroups.size
-          ? `已检测到 ${okGroups.size} 个文件/take 的 LTC；${writableOkFiles ? `可写入 ${writableOkFiles} 个 WAV，` : ""}可导出 ${okFiles} 条元数据${lowQualityGroups.size ? `；${lowQualityGroups.size} 个低质量请人工确认` : ""}`
+          ? `已检测到 ${okGroups.size} 个文件/take 的 LTC；${writableOkFiles ? `可写入 ${writableOkFiles} 个 WAV，` : ""}可导出 ${okFiles} 条元数据${lowQualityGroups.size ? `；${lowQualityGroups.size} 个低质量请人工确认` : ""}${softGroups.size ? `；${softGroups.size} 个兜底结果写入前需逐条核对` : ""}`
           : "没有检测到可用的 LTC";
         renderRows();
         break;

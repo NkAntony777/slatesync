@@ -1,8 +1,78 @@
-import { normalizeLtcAnalysisSignal } from "./ltc-signal.js";
+import { LTC_TUNING, normalizeLtcAnalysisSignal } from "./ltc-signal.js";
+import { decodeLtcEdgesRobust } from "./ltc-robust.js";
 
 export const LTC_WORKER_CODE = `
   const LITTLE = true;
-  const normalizeLtcAnalysisSignal = ${normalizeLtcAnalysisSignal.toString()};
+  const LTC_TUNING = ${JSON.stringify(LTC_TUNING)};
+  const T = LTC_TUNING;
+  function normalizeLtcAnalysisSignal(data) {
+    const T = LTC_TUNING.analysis;
+    let min = Infinity, max = -Infinity, sum = 0;
+    for (const sample of data) {
+      if (!Number.isFinite(sample)) return { data, analysisGain: 1, invalidSamples: true };
+      min = Math.min(min, sample); max = Math.max(max, sample); sum += sample * sample;
+    }
+    if (!data.length) return { data, analysisGain: 1 };
+    const peak = Math.max(Math.abs(min), Math.abs(max));
+    const rms = Math.sqrt(sum / data.length);
+    if (rms < T.rmsFloor || max - min < T.p2pFloor || (peak >= LTC_TUNING.peakFloor && max - min >= LTC_TUNING.p2pFloor)) {
+      return { data, analysisGain: 1 };
+    }
+    const gain = Math.min(T.gainCap, T.gainTargetPeak / Math.max(peak, T.rmsFloor));
+    const normalized = new Float32Array(data.length);
+    for (let i = 0; i < data.length; i++) normalized[i] = data[i] * gain;
+    return { data: normalized, analysisGain: gain };
+  }
+  const decodeLtcEdgesRobust = ${decodeLtcEdgesRobust.toString()};
+  const LTC_SYNC_WORDS = ${JSON.stringify([
+    "0011111111111101",
+    "1011111111111100",
+  ])};
+  // Integer 16-bit sync keys, closed under bit reversal so one membership test
+  // serves both polarities. Mirrors src/ltc-decoder.js exactly.
+  const LTC_SYNC_KEYS = (() => {
+    const keys = new Set();
+    const toKey = word => { let key = 0; for (const char of word) key = ((key << 1) | (char === "1" ? 1 : 0)) & 0xffff; return key; };
+    const reverse16 = key => { let out = 0; for (let i = 0; i < 16; i++) { out = (out << 1) | (key & 1); key >>>= 1; } return out; };
+    for (const word of LTC_SYNC_WORDS) { keys.add(toKey(word)); keys.add(reverse16(toKey(word))); }
+    return keys;
+  })();
+  function buildRollingSyncKeys(bits) {
+    const length = bits.length;
+    const keys = new Uint16Array(Math.max(0, length - 15));
+    let key = 0;
+    for (let i = 0; i < length; i++) {
+      key = ((key << 1) | (bits[i] ? 1 : 0)) & 0xffff;
+      if (i >= 15) keys[i - 15] = key;
+    }
+    return keys;
+  }
+  function syncAnchoredStarts(bits) {
+    const starts = [];
+    const keys = buildRollingSyncKeys(bits);
+    for (let start = 0; start + 80 <= bits.length; start++) {
+      if (LTC_SYNC_KEYS.has(keys[start + 64]) || LTC_SYNC_KEYS.has(keys[start])) starts.push(start);
+    }
+    return starts;
+  }
+  // Clock drift: see the long note in src/ltc-decoder.js. A correction is only
+  // applied when it is both statistically supported and large enough to matter.
+  const DRIFT = { deadband: 5e-4, max: 0.01, minWeight: 20000, maxJitter: 0.06, minCorrectionFrames: 0.25 };
+  function createDriftTracker() { return { weight: 0, ratio: 1 }; }
+  function observeDrift(tracker, observedHalfBitSamples, expectedHalfBitSamples, observedJitter, weight) {
+    if (!(observedHalfBitSamples > 0) || !(expectedHalfBitSamples > 0)) return;
+    if (observedJitter > DRIFT.maxJitter) return;
+    if (!(weight > 0)) return;
+    const ratio = observedHalfBitSamples / expectedHalfBitSamples;
+    if (!Number.isFinite(ratio) || Math.abs(ratio - 1) > DRIFT.max) return;
+    tracker.weight += weight;
+    tracker.ratio += (ratio - tracker.ratio) * (weight / tracker.weight);
+  }
+  function driftRatioFor(tracker) {
+    if (!tracker || tracker.weight < DRIFT.minWeight) return 1;
+    const delta = Math.abs(tracker.ratio - 1);
+    return delta < DRIFT.deadband || delta > DRIFT.max ? 1 : tracker.ratio;
+  }
   function gcd(a, b) { while (b) { const t = b; b = a % b; a = t; } return a || 1n; }
   function abs(n) { return n < 0n ? -n : n; }
   function frac(n, d = 1n) { if (d < 0n) { n = -n; d = -d; } const g = gcd(abs(n), d); return { n: n / g, d: d / g }; }
@@ -131,7 +201,7 @@ export const LTC_WORKER_CODE = `
       const highPassed = this.highPass(channel.data, sampleRate, highPassCutoff);
       const lowPassed = this.lowPass(highPassed, sampleRate, Math.min(lowPassCutoff, sampleRate * 0.45));
       const stats = this.channelStats(lowPassed);
-      const gain = Math.min(80, gainTarget / Math.max(stats.rms, 1e-6));
+      const gain = Math.min(T.analysis.conditioningGainCap, gainTarget / Math.max(stats.rms, T.analysis.rmsFloor));
       const norm = Math.tanh(drive);
       const data = new Float32Array(lowPassed.length);
       for (let i = 0; i < lowPassed.length; i++) data[i] = Math.tanh(lowPassed[i] * gain * drive) / norm;
@@ -171,15 +241,15 @@ export const LTC_WORKER_CODE = `
       return windows;
     },
     quickRejectChannel(channel, sampleRate) {
-      if (channel.peak < 0.035 || channel.p2p < 0.07) return { reject: true, reason: "level" };
+      if (channel.peak < T.peakFloor || channel.p2p < T.p2pFloor) return { reject: true, reason: "level" };
       const totalSamples = channel.data.length;
       if (totalSamples < sampleRate) return { reject: false, reason: "short" };
       const stats = this.channelStats(channel.data, 0, totalSamples);
-      if (stats.peak < 0.035 || stats.p2p < 0.07) return { reject: true, reason: "window-level" };
+      if (stats.peak < T.peakFloor || stats.p2p < T.p2pFloor) return { reject: true, reason: "window-level" };
       const center = (stats.max + stats.min) / 2;
-      const hysteresis = Math.max(stats.p2p * 0.06, stats.rms * 0.14, 0.004);
-      const minHalf = sampleRate / (120 * 80 * 2) * 0.45;
-      const maxHalf = sampleRate / (23.976 * 80 * 2) * 2.4;
+      const hysteresis = Math.max(stats.p2p * T.hysteresis.p2p, stats.rms * T.hysteresis.rms, T.hysteresis.floor);
+      const minHalf = sampleRate / (T.maxFps * 80 * 2) * T.minHalfScale;
+      const maxHalf = sampleRate / (T.minFps * 80 * 2) * T.maxHalfScale;
       const windowSamples = sampleRate * 2;
       const hopSamples = sampleRate;
       const bucketCount = Math.max(1, Math.ceil(Math.max(1, totalSamples - windowSamples) / hopSamples) + 1);
@@ -215,19 +285,19 @@ export const LTC_WORKER_CODE = `
           bestIntervals = windowIntervals;
         }
       }
-      if (bestIntervals < 800) return { reject: true, reason: "few-ltc-edges" };
-      if (bestPlausible < 700 || bestPlausible / Math.max(1, bestIntervals) < 0.72) return { reject: true, reason: "aperiodic" };
+      if (bestIntervals < T.edgeIntervalMin) return { reject: true, reason: "few-ltc-edges" };
+      if (bestPlausible < T.edgePlausibleMin || bestPlausible / Math.max(1, bestIntervals) < T.edgePlausibleRatio) return { reject: true, reason: "aperiodic" };
       return { reject: false, reason: "plausible", edges: bestPlausible };
     },
     estimateHalfBitSamples(channel, sampleRate) {
       let best = null;
       for (const window of this.channelWindows(channel, sampleRate)) {
         const stats = window;
-        if (stats.peak < 0.035 || stats.p2p < 0.07) continue;
+        if (stats.peak < T.peakFloor || stats.p2p < T.p2pFloor) continue;
         const center = (stats.max + stats.min) / 2;
-        const hysteresis = Math.max(stats.p2p * 0.06, stats.rms * 0.14, 0.004);
-        const minHalf = sampleRate / (120 * 80 * 2) * 0.45;
-        const maxHalf = sampleRate / (23.976 * 80 * 2) * 2.4;
+        const hysteresis = Math.max(stats.p2p * T.hysteresis.p2p, stats.rms * T.hysteresis.rms, T.hysteresis.floor);
+        const minHalf = sampleRate / (T.maxFps * 80 * 2) * T.minHalfScale;
+        const maxHalf = sampleRate / (T.minFps * 80 * 2) * T.maxHalfScale;
         const intervals = [];
         let state = window.data[0] >= center ? 1 : -1;
         let lastEdge = null;
@@ -282,9 +352,9 @@ export const LTC_WORKER_CODE = `
         .map(item => item.value);
     },
     findEdges(channel, expectedHalfBitSamples) {
-      if (channel.peak < 0.035 || channel.p2p < 0.07) return [];
+      if (channel.peak < T.peakFloor || channel.p2p < T.p2pFloor) return [];
       const center = (channel.max + channel.min) / 2;
-      const hysteresis = Math.max(channel.p2p * 0.08, channel.rms * 0.18, 0.006);
+      const hysteresis = Math.max(channel.p2p * T.hysteresis.p2p, channel.rms * T.hysteresis.rms, T.hysteresis.floor);
       const minEdgeDistance = Math.max(2, expectedHalfBitSamples * 0.35);
       const baseSample = channel.baseSample || 0;
       const edges = [];
@@ -305,28 +375,7 @@ export const LTC_WORKER_CODE = `
       return edges;
     },
     decodeBits(edges, expectedHalfBitSamples) {
-      const bits = [], bitStarts = [], bitEnds = [], observedHalves = [];
-      let half = expectedHalfBitSamples, rejected = 0;
-      for (let i = 0; i < edges.length - 1;) {
-        const interval = edges[i + 1] - edges[i];
-        const units = interval / half;
-        if (units > 0.55 && units < 1.45 && i + 2 < edges.length) {
-          const nextInterval = edges[i + 2] - edges[i + 1];
-          const nextUnits = nextInterval / half;
-          if (nextUnits > 0.55 && nextUnits < 1.45) {
-            bits.push(1); bitStarts.push(edges[i]); bitEnds.push(edges[i + 2]); observedHalves.push(interval, nextInterval);
-            half = half * 0.85 + ((interval + nextInterval) / 2) * 0.15; i += 2; continue;
-          }
-        }
-        if (units > 1.45 && units < 2.7) {
-          bits.push(0); bitStarts.push(edges[i]); bitEnds.push(edges[i + 1]); observedHalves.push(interval / 2);
-          half = half * 0.9 + (interval / 2) * 0.1; i += 1; continue;
-        }
-        rejected++; i += 1;
-      }
-      const observedMean = observedHalves.length ? observedHalves.reduce((sum, value) => sum + value, 0) / observedHalves.length : half;
-      const observedJitter = observedHalves.length ? Math.sqrt(observedHalves.reduce((sum, value) => sum + (value - observedMean) ** 2, 0) / observedHalves.length) / Math.max(observedMean, 1) : 1;
-      return { bits, bitStarts, bitEnds, rejected, trackedHalfBitSamples: half, observedHalfBitSamples: observedMean, observedJitter };
+      return decodeLtcEdgesRobust(edges, expectedHalfBitSamples);
     },
     decodeSoftGrid(channel, bitSamples, phase, radius) {
       const bits = [], bitStarts = [], bitEnds = [], margins = [];
@@ -398,12 +447,12 @@ export const LTC_WORKER_CODE = `
             penalty += margins[i] || 0;
           }
         }
-        const score = errors * 0.65 + penalty;
+        const score = errors * T.soft.syncErrorWeight + penalty;
         if (!best || score < best.score) best = { errors, penalty, score };
       }
       if (!best) return null;
       if (best.errors === 0) return { ...best, confidence: 1 };
-      if (best.errors <= 2 && best.penalty <= 1.25) return { ...best, confidence: Math.max(0, 1 - best.score / 4) };
+      if (best.errors <= 2 && best.penalty <= 1.25) return { ...best, confidence: Math.max(0, 1 - best.score / T.soft.syncScoreScale) };
       return null;
     },
     softFrameAt(decoded, start, fps, reverse = false, strictDrop = true) {
@@ -452,7 +501,7 @@ export const LTC_WORKER_CODE = `
       const dropCost = bits[10] === Boolean(fps.drop) ? { cost: 0, errors: 0 } : { cost: margins[10] || 0, errors: 1 };
       const softDigitCost = ff.cost + ss.cost + mm.cost + hh.cost + dropCost.cost;
       const softDigitErrors = ff.errors + ss.errors + mm.errors + hh.errors + dropCost.errors;
-      if (softDigitCost > 2 || softDigitErrors > 5) return null;
+      if (softDigitCost > T.soft.digitCostMax || softDigitErrors > T.soft.digitErrorsMax) return null;
       const timecode = String(hh.value).padStart(2, "0") + ":" + String(mm.value).padStart(2, "0") + ":" + String(ss.value).padStart(2, "0") + timecodeSeparator(fps) + String(ff.value).padStart(frameDigitsFor(fps), "0");
       try {
         return { timecode, frames: timecodeToFrames(timecode, fps), drop: Boolean(fps.drop), softDigitCost, softDigitErrors };
@@ -461,6 +510,9 @@ export const LTC_WORKER_CODE = `
       }
     },
     chooseSoftSyncCandidate(channel, record, fps, stats, expectedHalfBitSamples, strictDrop = true) {
+      const SOFT_MIN_RUN_FRAMES = 3;
+      const SOFT_MIN_SUPPORT = 3;
+      const SOFT_CONFIRM_RUN_FRAMES = 6;
       const bitSamples = expectedHalfBitSamples * 2;
       const radius = Math.max(1, Math.floor(expectedHalfBitSamples * 0.35));
       const candidates = [];
@@ -475,9 +527,9 @@ export const LTC_WORKER_CODE = `
           const newTimeReference = normalizeTimeReference(framesToSamples(frame.frames, record.sampleRate, fps) - BigInt(sampleOffset), record.sampleRate);
           const frameMargins = decoded.margins.slice(start, start + 80);
           const softMargin = frameMargins.reduce((sum, value) => sum + value, 0) / Math.max(1, frameMargins.length);
-          if (softMargin < 0.62) continue;
+          if (softMargin < T.soft.frameMarginMin) continue;
           frames.push({ ...frame, sampleOffset, newTimeReference, softMargin });
-          candidates.push({ ...frame, sampleOffset, newTimeReference, softMargin, measuredHalfBitSamples: expectedHalfBitSamples, halfBitError: 0.006, rejectRatio: 0, observedJitter: 0 });
+          candidates.push({ ...frame, sampleOffset, newTimeReference, softMargin, measuredHalfBitSamples: expectedHalfBitSamples, halfBitError: T.halfBitError.halfScoreSpan, rejectRatio: 0, observedJitter: 0 });
         }
         const frameByStart = new Map(frames.map(frame => [frame.bitStart, frame]));
         for (const first of frames) {
@@ -491,7 +543,7 @@ export const LTC_WORKER_CODE = `
             if (Math.abs(next.sampleOffset - expectedSample) > Math.max(8, bitSamples * 0.75)) break;
             run.push(next);
           }
-          if (run.length < 2) continue;
+          if (run.length < SOFT_MIN_RUN_FRAMES) continue;
           const last = run[run.length - 1];
           const sampleOffset = Math.max(0, Math.round(first.sampleStart || 0));
           const newTimeReference = normalizeTimeReference(framesToSamples(first.frames, record.sampleRate, fps) - BigInt(sampleOffset), record.sampleRate);
@@ -504,12 +556,12 @@ export const LTC_WORKER_CODE = `
       for (const candidate of candidates) {
         const cluster = candidates.filter(item => item.timecode === candidate.timecode && absBigInt(item.newTimeReference - candidate.newTimeReference) <= 4n);
         const runFrames = candidate.softRunFrames || 1;
-        if (runFrames < 2 && cluster.length < 4) continue;
+        if (runFrames < SOFT_MIN_RUN_FRAMES || cluster.length < SOFT_MIN_SUPPORT) continue;
         const clusterMargin = cluster.reduce((sum, item) => sum + item.softMargin, 0) / cluster.length;
-        if (clusterMargin < (runFrames >= 2 ? 0.64 : 0.72)) continue;
+        if (clusterMargin < 0.64) continue;
         const frameConfidence = cluster.reduce((sum, item) => sum + (item.softFrameConfidence || 0), 0) / cluster.length;
         const confidence = Math.max(0, Math.min(0.76, 0.42 + clusterMargin * 0.12 + frameConfidence * 0.1 + Math.min(cluster.length, 12) * 0.007 + Math.min(runFrames, 4) * 0.035));
-        const softCandidate = { ...candidate, frames: candidate.frames.toString(), newTimeReference: candidate.newTimeReference.toString(), confidence, lockedFrames: runFrames, softSync: true, softSyncSupport: cluster.length, softSyncMargin: clusterMargin, softFrameConfidence: frameConfidence, diagnostics: { peak: stats.peak, rms: stats.rms, p2p: stats.p2p, decodedBits: 80, rejectedEdges: 0, observedJitter: 0, measuredHalfBitSamples: expectedHalfBitSamples, halfBitError: candidate.halfBitError, rejectRatio: 0, softSyncSupport: cluster.length, softSyncMargin: clusterMargin, softFrameConfidence: frameConfidence, windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0 } };
+        const softCandidate = { ...candidate, frames: candidate.frames.toString(), newTimeReference: candidate.newTimeReference.toString(), confidence, lockedFrames: runFrames, softSync: true, softSyncSupport: cluster.length, softSyncMargin: clusterMargin, softFrameConfidence: frameConfidence, requiresConfirmation: true, softConfirmOnly: runFrames < SOFT_CONFIRM_RUN_FRAMES, diagnostics: { peak: stats.peak, rms: stats.rms, p2p: stats.p2p, decodedBits: 80, rejectedEdges: 0, observedJitter: 0, measuredHalfBitSamples: expectedHalfBitSamples, halfBitError: candidate.halfBitError, rejectRatio: 0, softSyncSupport: cluster.length, softSyncMargin: clusterMargin, softFrameConfidence: frameConfidence, windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0 } };
         const quality = this.qualityFor(softCandidate);
         softCandidate.qualityLabel = quality.label; softCandidate.qualityRank = quality.rank;
         if (!best || softCandidate.lockedFrames > best.lockedFrames || (softCandidate.lockedFrames === best.lockedFrames && softCandidate.softSyncSupport > best.softSyncSupport) || (softCandidate.lockedFrames === best.lockedFrames && softCandidate.softSyncSupport === best.softSyncSupport && softCandidate.softSyncMargin > best.softSyncMargin)) best = softCandidate;
@@ -550,44 +602,49 @@ export const LTC_WORKER_CODE = `
       return frames;
     },
     qualityFor(candidate) {
-      if (candidate.softSync && candidate.lockedFrames < 4) return { label: "低", rank: 1 };
-      if (candidate.confidence >= 0.82 && candidate.lockedFrames >= 6 && candidate.halfBitError <= 0.0025 && candidate.rejectRatio <= 0.08) return { label: "高", rank: 3 };
-      if (candidate.confidence >= 0.62 && candidate.lockedFrames >= 3 && candidate.halfBitError <= 0.008 && candidate.rejectRatio <= 0.2) return { label: "中", rank: 2 };
+      if (candidate.softSync && (candidate.softConfirmOnly || candidate.lockedFrames < T.quality.lowSoftFrames)) return { label: "低", rank: 1 };
+      if (candidate.confidence >= T.quality.highConfidence && candidate.lockedFrames >= T.quality.highFrames && candidate.halfBitError <= T.halfBitError.high && candidate.rejectRatio <= T.quality.highReject) return { label: "高", rank: 3 };
+      if (candidate.confidence >= T.quality.mediumConfidence && candidate.lockedFrames >= T.quality.mediumFrames && candidate.halfBitError <= T.halfBitError.medium && candidate.rejectRatio <= T.quality.mediumReject) return { label: "中", rank: 2 };
       return { label: "低", rank: 1 };
     },
     isHighQualityCandidate(candidate) {
-      return candidate?.qualityRank >= 3 && candidate.lockedFrames >= 6 && candidate.halfBitError <= 0.0025 && candidate.rejectRatio <= 0.08 && candidate.confidence >= 0.82;
+      return candidate?.qualityRank >= 3 && candidate.lockedFrames >= T.quality.highFrames && candidate.halfBitError <= T.halfBitError.high && candidate.rejectRatio <= T.quality.highReject && candidate.confidence >= T.quality.highConfidence;
     },
     isDefinitiveCandidate(candidate) {
-      return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= 0.00025;
+      return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= T.halfBitError.definitive;
     },
     compareResults(a, b) {
       if ((b.qualityRank || 0) !== (a.qualityRank || 0)) return (b.qualityRank || 0) - (a.qualityRank || 0);
-      if (Math.abs((a.halfBitError || 1) - (b.halfBitError || 1)) > 0.00025) return (a.halfBitError || 1) - (b.halfBitError || 1);
+      if (Math.abs((a.halfBitError || 1) - (b.halfBitError || 1)) > T.halfBitError.definitive) return (a.halfBitError || 1) - (b.halfBitError || 1);
       if ((b.lockedFrames || 0) !== (a.lockedFrames || 0)) return (b.lockedFrames || 0) - (a.lockedFrames || 0);
       if ((b.confidence || 0) !== (a.confidence || 0)) return (b.confidence || 0) - (a.confidence || 0);
       if (Boolean(a.reverse) !== Boolean(b.reverse)) return Number(a.reverse) - Number(b.reverse);
       return (a.sampleOffset || 0) - (b.sampleOffset || 0);
     },
-    chooseCandidate(decoded, record, fps, stats, expectedHalfBitSamples, strictDrop = true) {
+    chooseCandidate(decoded, record, fps, stats, expectedHalfBitSamples, strictDrop = true, driftRatio = 1) {
+      const fpsValue = Number(fps.rate.n) / Number(fps.rate.d);
       let best = null;
-      for (let start = 0; start + 80 <= decoded.bits.length; start++) {
+      for (const start of syncAnchoredStarts(decoded.bits)) {
         for (const reverse of [false, true]) {
           const run = this.consecutiveRun(decoded, start, fps, reverse, strictDrop);
           if (run.length < 2) continue;
           const first = run[0], last = run[run.length - 1];
-          const sampleOffset = Math.max(0, Math.round(first.sampleStart || 0));
+          // Drift-correct the file-start offset; see src/ltc-decoder.js.
+          const rawSampleOffset = Math.max(0, Math.round(first.sampleStart || 0));
+          const samplesPerFrame = record.sampleRate / fpsValue;
+          const corrected = Math.max(0, Math.round(rawSampleOffset / driftRatio));
+          const sampleOffset = Math.abs(corrected - rawSampleOffset) >= samplesPerFrame * DRIFT.minCorrectionFrames ? corrected : rawSampleOffset;
           const newTimeReference = normalizeTimeReference(framesToSamples(first.frames, record.sampleRate, fps) - BigInt(sampleOffset), record.sampleRate);
           const measuredHalfBitSamples = (last.sampleEnd - first.sampleStart) / Math.max(1, run.length * 80 * 2);
           const halfBitError = Math.abs(measuredHalfBitSamples - expectedHalfBitSamples) / expectedHalfBitSamples;
           const rejectRatio = decoded.rejected / Math.max(1, decoded.rejected + decoded.bits.length);
           const lockScore = Math.min(1, run.length / 8);
-          const halfScore = Math.max(0, Math.min(1, 1 - halfBitError / 0.006));
+          const halfScore = Math.max(0, Math.min(1, 1 - halfBitError / T.halfBitError.halfScoreSpan));
           const consistencyScore = Math.max(0, Math.min(1, 1 - (decoded.observedJitter || 0) / 0.18));
           const edgeScore = Math.min(1, decoded.bits.length / 320);
           const levelScore = Math.min(1, stats.p2p / 0.6);
           const confidence = Math.max(0, Math.min(1, lockScore * 0.3 + halfScore * 0.3 + consistencyScore * 0.12 + edgeScore * 0.12 + levelScore * 0.12 - rejectRatio * 0.18 + 0.04));
-          const candidate = { ...first, frames: first.frames.toString(), sampleOffset, newTimeReference: newTimeReference.toString(), confidence, lockedFrames: run.length, reverse, measuredHalfBitSamples, halfBitError, rejectRatio, observedJitter: decoded.observedJitter, windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0, diagnostics: { peak: stats.peak, rms: stats.rms, p2p: stats.p2p, decodedBits: decoded.bits.length, rejectedEdges: decoded.rejected, observedJitter: decoded.observedJitter, measuredHalfBitSamples, halfBitError, rejectRatio, windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0 } };
+          const candidate = { ...first, frames: first.frames.toString(), sampleOffset, newTimeReference: newTimeReference.toString(), confidence, lockedFrames: run.length, reverse, measuredHalfBitSamples, halfBitError, rejectRatio, observedJitter: decoded.observedJitter, driftRatio, driftPpm: Math.round((driftRatio - 1) * 1e6), windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0, diagnostics: { peak: stats.peak, rms: stats.rms, p2p: stats.p2p, decodedBits: decoded.bits.length, rejectedEdges: decoded.rejected, observedJitter: decoded.observedJitter, measuredHalfBitSamples, halfBitError, rejectRatio, driftRatio, driftPpm: Math.round((driftRatio - 1) * 1e6), windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0 } };
           const quality = this.qualityFor(candidate);
           candidate.qualityLabel = quality.label; candidate.qualityRank = quality.rank;
           if (!best || this.compareResults(candidate, best) < 0) best = candidate;
@@ -595,30 +652,41 @@ export const LTC_WORKER_CODE = `
       }
       return best;
     },
-    detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, strictDrop = true, allowSoftSync = false) {
+    // Frame-rate independent work: conditioning and windowing are computed once
+    // per channel instead of once per candidate frame rate.
+    prepareChannelAnalysis(channel, sampleRate) {
+      return this.channelVariants(channel, sampleRate).map(variant => ({ variant, windows: this.channelWindows(variant, sampleRate) }));
+    },
+    detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, strictDrop = true, allowSoftSync = false, prepared = null, driftTracker = null) {
+      const tracker = driftTracker || createDriftTracker();
+      const preparedVariants = prepared || this.prepareChannelAnalysis(channel, record.sampleRate);
       let best = null;
-      for (const variant of this.channelVariants(channel, record.sampleRate)) {
-        for (const window of this.channelWindows(variant, record.sampleRate)) {
+      for (const { variant, windows } of preparedVariants) {
+        for (const window of windows) {
           const edges = this.findEdges(window, expectedHalfBitSamples);
           if (edges.length < 160) continue;
           const decoded = this.decodeBits(edges, expectedHalfBitSamples);
-          const candidate = this.chooseCandidate(decoded, record, fps, window, expectedHalfBitSamples, strictDrop);
+          observeDrift(tracker, decoded.observedHalfBitSamples, expectedHalfBitSamples, decoded.observedJitter, decoded.observedCount || 0);
+          const candidate = this.chooseCandidate(decoded, record, fps, window, expectedHalfBitSamples, strictDrop, driftRatioFor(tracker));
           if (!candidate) continue;
+          if (variant.conditioned && candidate.lockedFrames < 3) continue;
           candidate.conditioned = Boolean(variant.conditioned);
           candidate.conditionProfile = variant.conditionProfile || "raw";
           if (!best || this.compareResults(candidate, best) < 0) best = candidate;
           if (this.isHighQualityCandidate(best)) return { ...best, channelIndex, channelLabel: String(channelIndex + 1), halfBitSamples: expectedHalfBitSamples };
         }
       }
+      // Soft fallback also runs on the conditioned variants (see src/ltc-decoder.js).
       if (!best && allowSoftSync) {
-        for (const variant of [{ ...channel, conditioned: false }]) {
-          for (const window of this.channelWindows(variant, record.sampleRate)) {
+        for (const { variant, windows } of preparedVariants) {
+          for (const window of windows) {
             const candidate = this.chooseSoftSyncCandidate(window, record, fps, window, expectedHalfBitSamples, strictDrop);
             if (!candidate) continue;
             candidate.conditioned = Boolean(variant.conditioned);
             candidate.conditionProfile = variant.conditionProfile || "raw";
             if (!best || this.compareResults(candidate, best) < 0) best = candidate;
           }
+          if (best && (best.lockedFrames || 0) >= 4) break;
         }
       }
       return best ? { ...best, channelIndex, channelLabel: String(channelIndex + 1), halfBitSamples: expectedHalfBitSamples } : null;
@@ -658,15 +726,17 @@ export const LTC_WORKER_CODE = `
           continue;
         }
         const candidateValues = this.fpsCandidatesForChannel(channel, record.sampleRate, preferredValue, values);
+        const prepared = this.prepareChannelAnalysis(channel, record.sampleRate);
+        const driftTracker = createDriftTracker();
         const resultsBefore = results.length;
         for (const value of candidateValues) {
           const fps = parseFps(value);
           const fpsValue = Number(fps.rate.n) / Number(fps.rate.d);
           const expectedHalfBitSamples = record.sampleRate / (fpsValue * 80 * 2);
-          let result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, true, allowSoftSync && value === preferredValue);
+          let result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, true, allowSoftSync && value === preferredValue, prepared, driftTracker);
           if (!result && value === preferredValue) {
             const retrySoftSync = allowSoftSync && Boolean(fps.drop);
-            result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, false, retrySoftSync);
+            result = this.detectOnChannelData(record, channelIndex, fps, channel, expectedHalfBitSamples, false, retrySoftSync, prepared, driftTracker);
             if (result) result.dropMismatch = result.drop !== Boolean(fps.drop);
           }
           if (result) {
