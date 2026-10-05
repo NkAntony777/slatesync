@@ -1,0 +1,36 @@
+# Reference checkout (kept locally, not a nested/submodule repository)
+/ref-audiotc/
+
+# Browser automation output and local tools
+/.playwright-mcp/
+/playwright-report/
+/test-results/
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Generated media, exports, raw machine-specific reports
+/demo/
+/test/artifacts/
+/output/
+/dist/
+*.partial
+*.log
+
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/

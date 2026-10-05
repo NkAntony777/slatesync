@@ -1,0 +1,963 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LTC 合板助手 · Zoom H 系列音频时码</title>
+  <meta name="theme-color" content="#202a36">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Audio TC Change">
+  <link rel="manifest" href="./bwf-timecode.webmanifest">
+  <link rel="icon" href="./bwf-timecode-icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./bwf-timecode-icon-192.png">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h2.5l2-7 3.5 14 3-10.5L15 12h2.5l1.5-2.5L21.5 12"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1 class="app-title">LTC 合板助手 <span id="appVersionBadge" class="app-version"></span></h1>
+          <div class="subtitle">ZOOM H 系列分轨 · LTC 提取 · Poly 合并 · 诊断</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <label class="topbar-fps">
+          <span>工程帧率</span>
+          <div class="select-field" data-select>
+            <select id="fpsInput" aria-label="frame rate">
+              <option value="23.976">23.976</option>
+              <option value="24" selected>24.00</option>
+              <option value="25">25.00</option>
+              <option value="29.97">29.97</option>
+              <option value="29.97df">29.97 DF</option>
+              <option value="30">30.00</option>
+              <option value="48">48.00</option>
+              <option value="50">50.00</option>
+              <option value="59.94">59.94</option>
+              <option value="59.94df">59.94 DF</option>
+              <option value="60">60.00</option>
+              <option value="96">96.00</option>
+              <option value="100">100.00</option>
+              <option value="119.88">119.88</option>
+              <option value="119.88df">119.88 DF</option>
+              <option value="120">120.00</option>
+            </select>
+            <button id="fpsSelectButton" class="select-button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="fpsSelectMenu">
+              <span>24.00</span>
+            </button>
+            <div id="fpsSelectMenu" class="select-menu" role="listbox" aria-label="frame rate" hidden></div>
+          </div>
+        </label>
+        <span class="badge">本地处理 · 文件不上传</span>
+        <button id="installBtn" class="install-btn" type="button" hidden>安装应用</button>
+      </div>
+    </header>
+
+    <nav class="flow-steps" id="flowSteps" aria-label="工作流">
+      <div class="step" data-step="import" data-state="active"><span class="step-num">1</span><span class="step-text">导入素材</span></div>
+      <div class="step" data-step="ltc"><span class="step-num">2</span><span class="step-text">提取时码</span></div>
+      <div class="step" data-step="diag"><span class="step-num">3</span><span class="step-text">检查诊断</span></div>
+      <div class="step" data-step="output"><span class="step-num">4</span><span class="step-text">合并输出</span></div>
+    </nav>
+
+    <main class="layout">
+      <div class="content-col">
+        <section class="stats" aria-label="summary">
+          <div class="stat"><span>文件</span><strong id="fileCount">0</strong></div>
+          <div class="stat"><span>偏移帧</span><strong id="offsetFrames">-</strong></div>
+          <div class="stat"><span>偏移采样</span><strong id="offsetSamples">-</strong></div>
+          <div class="stat"><span>采样率</span><strong id="sampleRates">-</strong></div>
+          <div class="stat stat-state"><span>状态</span><strong id="stateText">待机</strong></div>
+        </section>
+
+        <section class="workspace">
+          <div class="table-head">
+            <div class="table-title">文件信息 <span id="phasePill" class="phase">原始信息</span></div>
+            <div class="table-actions" aria-label="列表操作">
+              <button id="removeSelectedBtn" type="button" disabled>移除</button>
+              <button id="clearListBtn" type="button" disabled>清空列表</button>
+            </div>
+            <div id="statusLine" class="status">拖入 WAV / MOV / MP4 / ALE / CSV 文件后显示原始信息</div>
+          </div>
+          <div class="table-wrap">
+            <table id="previewTable" hidden>
+              <thead>
+                <tr>
+                  <th>文件</th>
+                  <th>采样率</th>
+                  <th>声道</th>
+                  <th>位深</th>
+                  <th>FPS</th>
+                  <th>文件起始TC</th>
+                  <th>新起始</th>
+                  <th>文件结束TC</th>
+                  <th>新结束</th>
+                  <th>原始 TimeReference</th>
+                  <th>新 TimeReference</th>
+                  <th class="ltc-col">LTC读取时码</th>
+                  <th class="ltc-col">LTC检测状态</th>
+                  <th>时长</th>
+                  <th>结果</th>
+                </tr>
+              </thead>
+              <tbody id="previewBody"></tbody>
+            </table>
+            <div id="emptyState" class="empty" role="button" tabindex="0">
+              <span class="empty-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v1.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V17"/></svg>
+              </span>
+              <span class="empty-title">拖入文件夹或音频文件</span>
+              <span class="empty-sub">WAV / MOV / MP4 / ALE / CSV · ZOOM H8 直接拖 FOLDER 文件夹即可</span>
+            </div>
+          </div>
+          <div id="log" class="log">Ready.</div>
+        </section>
+
+        <section id="diagSection" class="diagnostics" aria-label="LTC diagnostics" hidden>
+          <div class="diag-head">
+            <h2 class="diag-title">LTC 诊断报告</h2>
+            <span id="diagSummary" class="diag-summary-text"></span>
+          </div>
+          <div id="diagBody" class="diag-body"></div>
+        </section>
+      </div>
+
+      <aside class="side-rail">
+        <section class="rail-card rail-primary">
+          <div class="rail-card-head">
+            <h3>提取 LTC 时码</h3>
+          </div>
+          <p class="rail-hint">逐轨扫描音频时码信号，自动倒推文件起始 TC（适配 ZOOM H 系列分轨）</p>
+          <label class="check-row" title="勾选后，直接写入会静音源文件 LTC 轨；合并 Poly 会静音新 Poly 中对应的 LTC 轨">
+            <input id="muteLtcInput" type="checkbox" checked>
+            <span>静音 LTC 轨</span>
+          </label>
+          <div class="rail-actions">
+            <button id="extractLtcBtn" class="primary" type="button" title="从 WAV 或视频音轨提取 LTC 时码" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 12h2l2-6 3 12 3-9 2 3h4"/></svg>
+              提取时码
+            </button>
+            <button id="extractLtcFallbackBtn" type="button" title="选中少数疑难素材后启用增强识别，速度较慢，低质量结果需人工确认" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              增强识别选中项
+            </button>
+          </div>
+        </section>
+
+        <section class="rail-card">
+          <div class="rail-card-head"><h3>写入 / 输出</h3></div>
+          <div class="rail-actions">
+            <button id="writeLtcBtn" class="primary" type="button" title="仅对 WAV/BWF 写入；视频文件只导出元数据" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>
+              写入文件时码
+            </button>
+            <button id="combinePolyBtn" type="button" title="将同一 take 的分轨合并为 Poly WAV" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+              合并 Poly WAV
+            </button>
+            <button id="exportMetadataBtn" type="button" title="导出 Resolve CSV / ALE 元数据" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M9 15h6M9 11h2"/></svg>
+              导出元数据
+            </button>
+            <button id="fpsMetadataBtn" type="button" title="修改 WAV 文件内的帧率元数据" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 10h4M3 14h4M17 10h4M17 14h4"/></svg>
+              修改文件 FPS
+            </button>
+          </div>
+        </section>
+
+        <details class="rail-card rail-collapsible">
+          <summary>偏移校正 <span class="rail-tag">高级</span><span class="chev" aria-hidden="true"></span></summary>
+          <div class="rail-card-body">
+            <label class="field">
+              偏移时间码
+              <div class="timecode-control">
+                <button id="offsetSignBtn" class="sign-toggle" type="button" data-sign="1" title="切换加/减偏移" aria-label="切换加减偏移">+</button>
+                <input id="offsetInput" value="00:00:00:00" inputmode="numeric" aria-label="offset timecode" autocomplete="off" spellcheck="false">
+                <div class="tc-steppers">
+                  <button id="tcUpBtn" class="tc-step" type="button" title="增加一帧">▲</button>
+                  <button id="tcDownBtn" class="tc-step" type="button" title="减少一帧">▼</button>
+                </div>
+              </div>
+            </label>
+            <label class="check-row" title="默认按最近整帧显示；勾选后显示 sample 级 sub-frame 余量">
+              <input id="preciseTimecodeInput" type="checkbox">
+              <span>显示 sub-frame</span>
+            </label>
+            <div class="rail-actions rail-actions-row">
+              <button id="previewBtn" class="primary" title="预览修改" disabled>预览</button>
+              <button id="applyBtn" class="danger" title="写入" disabled>写入</button>
+              <button id="undoBtn" title="撤销上一次写入" disabled>撤销</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="rail-card rail-collapsible">
+          <summary>时间码计算器<span class="chev" aria-hidden="true"></span></summary>
+          <div class="rail-card-body">
+            <div class="calculator">
+              <div class="calc-expression">
+                <label class="calc-a-field">
+                  时间码 A
+                  <div class="timecode-control">
+                    <input id="calcStartInput" value="00:00:00:00" inputmode="numeric" aria-label="timecode A" autocomplete="off" spellcheck="false">
+                    <div class="tc-steppers">
+                      <button id="calcStartUpBtn" class="tc-step" type="button" title="A 增加一帧">▲</button>
+                      <button id="calcStartDownBtn" class="tc-step" type="button" title="A 减少一帧">▼</button>
+                    </div>
+                  </div>
+                </label>
+                <div class="calc-op-row">
+                  <button id="calcSwapBtn" class="calc-swap-btn" type="button" title="交换 A/B" aria-label="交换 A/B">
+                    <span class="swap-arrows" aria-hidden="true"><span></span><span></span></span>
+                  </button>
+                  <button id="calcOpBtn" class="calc-operator" type="button" data-op="-" title="切换加/减" aria-label="切换加减">−</button>
+                </div>
+                <label class="calc-b-field">
+                  <div class="calc-label-row">
+                    <span id="calcBLabel">时间码 B</span>
+                    <div class="calc-mode-toggle" aria-label="B 输入模式">
+                      <button id="calcBModeTimecodeBtn" class="calc-mode-btn active" type="button" data-mode="timecode">时码</button>
+                      <button id="calcBModeFramesBtn" class="calc-mode-btn" type="button" data-mode="frames">帧</button>
+                    </div>
+                  </div>
+                  <div id="calcEndTimecodeControl" class="timecode-control">
+                    <input id="calcEndInput" value="00:00:00:00" inputmode="numeric" aria-label="timecode B" autocomplete="off" spellcheck="false">
+                    <div class="tc-steppers">
+                      <button id="calcEndUpBtn" class="tc-step" type="button" title="B 增加一帧">▲</button>
+                      <button id="calcEndDownBtn" class="tc-step" type="button" title="B 减少一帧">▼</button>
+                    </div>
+                  </div>
+                  <div id="calcFrameControl" class="calc-frame-control" hidden>
+                    <input id="calcFrameInput" value="0" inputmode="numeric" aria-label="frames B" autocomplete="off" spellcheck="false">
+                    <div class="calc-frame-unit">FR</div>
+                  </div>
+                </label>
+                <div class="calc-result-block">
+                  <div class="calc-label-row">
+                    <span>结果</span>
+                    <span id="calcTotalFrames" class="calc-meta">0 帧</span>
+                  </div>
+                  <div id="calcResult" class="calc-result">00:00:00:00</div>
+                  <button id="useCalcBtn" class="primary" type="button" disabled>填入偏移时码</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details class="rail-card rail-collapsible">
+          <summary>使用说明<span class="chev" aria-hidden="true"></span></summary>
+          <div class="rail-card-body rail-notes">
+            <p>1. 视频文件仅支持导出 Resolve CSV / ALE 元数据，不直接修改视频文件。</p>
+            <p>2. ZOOM H 系列 Stereo + Mono 分轨可批量合并为 Poly WAV。</p>
+            <p>3. 时码识别失败请看下方「LTC 诊断报告」，逐轨查看原因与修改建议。</p>
+            <p>4. 推荐 Chrome / Edge；文件全程本地处理，不上传服务器。</p>
+          </div>
+        </details>
+      </aside>
+    </main>
+    <footer>
+      <div class="footer-inner">
+        <a class="github-link" href="https://github.com/xnpeter/Audio-TC-Change" target="_blank" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+          <span>GitHub</span>
+        </a>
+        <p class="copyright">LTC 合板助手 | 基于 Audio TC Change (MIT) by 诺米 扩展诊断功能</p>
+      </div>
+    </footer>
+  </div>
+
+  <div id="progressOverlay">
+    <div id="progressBox">
+      <div class="progress-label" id="progressLabel">正在写入…</div>
+      <div class="progress-file" id="progressFile"></div>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-pct" id="progressPct">0%</div>
+    </div>
+  </div>
+  <div id="confirmOverlay" aria-hidden="true">
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmCopy">
+      <div class="confirm-title" id="confirmTitle">确认写入文件？</div>
+      <div class="confirm-copy" id="confirmCopy"></div>
+      <div class="confirm-actions">
+        <button id="confirmCancelBtn" type="button">取消</button>
+        <button id="confirmAltBtn" type="button" hidden>ALE</button>
+        <button id="confirmWriteBtn" class="danger" type="button">确认写入</button>
+      </div>
+    </div>
+  </div>
+  <div id="fpsMetadataOverlay" aria-hidden="true">
+    <div class="fps-metadata-dialog" role="dialog" aria-modal="true" aria-labelledby="fpsMetadataTitle">
+      <div class="confirm-title" id="fpsMetadataTitle">修改 WAV 帧率元数据</div>
+      <div class="fps-dialog-grid">
+        <fieldset class="fps-scope-fieldset">
+          <legend>修改范围</legend>
+          <label class="fps-radio-option">
+            <input id="fpsScopeSelected" type="radio" name="fpsMetadataScope" value="selected">
+            <span id="fpsScopeSelectedLabel">已选中的 WAV</span>
+          </label>
+          <label class="fps-radio-option">
+            <input id="fpsScopeAll" type="radio" name="fpsMetadataScope" value="all" checked>
+            <span id="fpsScopeAllLabel">列表中的全部 WAV</span>
+          </label>
+        </fieldset>
+
+        <div class="fps-current-block">
+          <div class="fps-dialog-label">当前帧率</div>
+          <div id="fpsMetadataSummary" class="fps-summary"></div>
+        </div>
+
+        <label>
+          目标帧率
+          <select id="fpsMetadataTarget" aria-label="target file FPS">
+            <option value="23.976">23.976 NDF</option>
+            <option value="24">24.00 NDF</option>
+            <option value="25">25.00 NDF</option>
+            <option value="29.97">29.97 NDF</option>
+            <option value="29.97df">29.97 DF</option>
+            <option value="30">30.00 NDF</option>
+            <option value="48">48.00 NDF</option>
+            <option value="50">50.00 NDF</option>
+            <option value="59.94">59.94 NDF</option>
+            <option value="59.94df">59.94 DF</option>
+            <option value="60">60.00 NDF</option>
+            <option value="96">96.00 NDF</option>
+            <option value="100">100.00 NDF</option>
+            <option value="119.88">119.88 NDF</option>
+            <option value="119.88df">119.88 DF</option>
+            <option value="120">120.00 NDF</option>
+          </select>
+        </label>
+
+        <div class="fps-mode-note">
+          <strong>TimeReference、音频采样率和音频内容保持不变</strong>
+          <span>默认只改文件里已经有的帧率来源，不新造字段。</span>
+        </div>
+
+        <fieldset class="fps-scope-fieldset fps-policy-fieldset">
+          <legend>写入策略</legend>
+          <label class="fps-radio-option">
+            <input id="fpsPolicyExisting" type="radio" name="fpsWritePolicy" value="existing" checked>
+            <span>按已有来源写入（推荐）</span>
+          </label>
+          <label class="fps-radio-option">
+            <input id="fpsPolicySkip" type="radio" name="fpsWritePolicy" value="skip">
+            <span>跳过</span>
+          </label>
+          <label class="fps-radio-option">
+            <input id="fpsPolicyIxml" type="radio" name="fpsWritePolicy" value="ixml">
+            <span>只改 iXML</span>
+          </label>
+          <label class="fps-radio-option">
+            <input id="fpsPolicyBext" type="radio" name="fpsWritePolicy" value="bext">
+            <span>只改 bext aSPEED</span>
+          </label>
+          <label class="fps-radio-option">
+            <input id="fpsPolicyBoth" type="radio" name="fpsWritePolicy" value="both">
+            <span>两个都写入</span>
+          </label>
+          <div id="fpsPolicyHint" class="fps-policy-hint">有 iXML 就改 iXML，有 aSPEED 就改 aSPEED；两边都有就都改；都没有则跳过。不新造字段。</div>
+        </fieldset>
+
+        <div class="fps-preview-example">
+          <div class="fps-dialog-label">修改后显示示例</div>
+          <div id="fpsMetadataExample" class="fps-example-copy"></div>
+        </div>
+      </div>
+      <div class="confirm-actions">
+        <button id="fpsMetadataCancelBtn" type="button">取消</button>
+        <button id="fpsMetadataPreviewBtn" class="primary" type="button">生成预览</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast">✅ 写入完成</div>
+
+  <script>
+    window.__audioTcAppStarted = false;
+    setTimeout(() => {
+      if (window.__audioTcAppStarted) return;
+      const stateText = document.getElementById("stateText");
+      const statusLine = document.getElementById("statusLine");
+      const log = document.getElementById("log");
+      if (stateText) stateText.textContent = "未启动";
+      if (statusLine) {
+        statusLine.textContent = location.protocol === "file:"
+          ? "请通过本地 HTTP 服务打开：python3 -m http.server 8765 --bind 127.0.0.1，然后访问 http://127.0.0.1:8765/"
+          : "应用脚本未能加载，请刷新页面或检查浏览器控制台";
+      }
+      if (log) {
+        log.textContent = `[${new Date().toLocaleTimeString()}] APP ERROR: module script did not start\n` + log.textContent;
+      }
+    }, 1200);
+  </script>
+  <script type="module">
+    window.__audioTcAppStarted = true;
+    import {
+      dropFramesFor,
+      framesToSamples,
+      mulFrac,
+      nominalFpsFor,
+      parseFps,
+      samplesToTimecode as formatSamplesToTimecode,
+    } from "./src/timecode.js";
+    import { scanWave } from "./src/wave.js";
+    import { scanVideo } from "./src/video.js";
+    import { parseMetadataImport } from "./src/metadata-import.js";
+    import { createMetadataExportController } from "./src/metadata-export-controller.js";
+    import { renderAppVersion } from "./src/app-version.js";
+    import { createConfirmFlows } from "./src/confirm-flows.js";
+    import { initCustomSelect } from "./src/custom-select.js";
+    import { createFileImportController } from "./src/file-import.js";
+    import { createFpsMetadataController } from "./src/fps-metadata.js";
+    import { createFpsWriteController } from "./src/fps-write-controller.js";
+    import { createLtcController } from "./src/ltc-controller.js";
+    import { createDiagnosticsPanel } from "./src/diagnostics-panel.js";
+    import { createDialogController } from "./src/dialogs.js";
+    import { createCalculatorController } from "./src/calculator.js";
+    import { createTimecodeInputController } from "./src/timecode-input.js";
+    import { createOffsetInputController } from "./src/offset-input.js";
+    import { createPolyCombineController } from "./src/poly-combine-controller.js";
+    import { createPreviewTableRenderer } from "./src/preview-table.js";
+    import { setupPwa } from "./src/pwa.js";
+    import { createTimeReferenceWriteController } from "./src/time-reference-write-controller.js";
+    import { createUiStateController } from "./src/ui-state.js";
+    import {
+      combineEligibleGroupsFor,
+      detectTakeGroupKeys,
+      takeGroupCount,
+      groupKeyFor,
+      groupLabelFor,
+      isTakeTrackFor,
+      recordKey,
+      recordLabel,
+      recordsByGroupFor,
+    } from "./src/grouping.js";
+
+    const WAV_SUFFIX = /\.(wav|wave)$/i;
+    const VIDEO_SUFFIX = /\.(mov|mp4|m4v)$/i;
+    const METADATA_SUFFIX = /\.(ale|csv)$/i;
+
+    const els = {
+      appVersionBadge: document.getElementById("appVersionBadge"),
+      offsetSignBtn: document.getElementById("offsetSignBtn"),
+      offsetInput: document.getElementById("offsetInput"),
+      tcUpBtn: document.getElementById("tcUpBtn"),
+      tcDownBtn: document.getElementById("tcDownBtn"),
+      fpsInput: document.getElementById("fpsInput"),
+      fpsSelectButton: document.getElementById("fpsSelectButton"),
+      fpsSelectMenu: document.getElementById("fpsSelectMenu"),
+      preciseTimecodeInput: document.getElementById("preciseTimecodeInput"),
+      calcStartInput: document.getElementById("calcStartInput"),
+      calcStartUpBtn: document.getElementById("calcStartUpBtn"),
+      calcStartDownBtn: document.getElementById("calcStartDownBtn"),
+      calcEndInput: document.getElementById("calcEndInput"),
+      calcEndUpBtn: document.getElementById("calcEndUpBtn"),
+      calcEndDownBtn: document.getElementById("calcEndDownBtn"),
+      calcEndTimecodeControl: document.getElementById("calcEndTimecodeControl"),
+      calcFrameControl: document.getElementById("calcFrameControl"),
+      calcFrameInput: document.getElementById("calcFrameInput"),
+      calcBLabel: document.getElementById("calcBLabel"),
+      calcBModeTimecodeBtn: document.getElementById("calcBModeTimecodeBtn"),
+      calcBModeFramesBtn: document.getElementById("calcBModeFramesBtn"),
+      calcSwapBtn: document.getElementById("calcSwapBtn"),
+      calcOpBtn: document.getElementById("calcOpBtn"),
+      calcResult: document.getElementById("calcResult"),
+      calcTotalFrames: document.getElementById("calcTotalFrames"),
+      useCalcBtn: document.getElementById("useCalcBtn"),
+      previewBtn: document.getElementById("previewBtn"),
+      applyBtn: document.getElementById("applyBtn"),
+      undoBtn: document.getElementById("undoBtn"),
+      extractLtcBtn: document.getElementById("extractLtcBtn"),
+      extractLtcFallbackBtn: document.getElementById("extractLtcFallbackBtn"),
+      exportMetadataBtn: document.getElementById("exportMetadataBtn"),
+      fpsMetadataBtn: document.getElementById("fpsMetadataBtn"),
+      combinePolyBtn: document.getElementById("combinePolyBtn"),
+      writeLtcBtn: document.getElementById("writeLtcBtn"),
+      muteLtcInput: document.getElementById("muteLtcInput"),
+      removeSelectedBtn: document.getElementById("removeSelectedBtn"),
+      clearListBtn: document.getElementById("clearListBtn"),
+      fileCount: document.getElementById("fileCount"),
+      offsetFrames: document.getElementById("offsetFrames"),
+      offsetSamples: document.getElementById("offsetSamples"),
+      sampleRates: document.getElementById("sampleRates"),
+      stateText: document.getElementById("stateText"),
+      installBtn: document.getElementById("installBtn"),
+      statusLine: document.getElementById("statusLine"),
+      phasePill: document.getElementById("phasePill"),
+      previewTable: document.getElementById("previewTable"),
+      previewBody: document.getElementById("previewBody"),
+      emptyState: document.getElementById("emptyState"),
+      diagSection: document.getElementById("diagSection"),
+      diagBody: document.getElementById("diagBody"),
+      diagSummary: document.getElementById("diagSummary"),
+      log: document.getElementById("log"),
+      toast: document.getElementById("toast"),
+      progressOverlay: document.getElementById("progressOverlay"),
+      progressLabel: document.getElementById("progressLabel"),
+      progressFill: document.getElementById("progressFill"),
+      progressPct: document.getElementById("progressPct"),
+      progressFile: document.getElementById("progressFile"),
+      confirmOverlay: document.getElementById("confirmOverlay"),
+      confirmTitle: document.getElementById("confirmTitle"),
+      confirmCopy: document.getElementById("confirmCopy"),
+      confirmCancelBtn: document.getElementById("confirmCancelBtn"),
+      confirmAltBtn: document.getElementById("confirmAltBtn"),
+      confirmWriteBtn: document.getElementById("confirmWriteBtn"),
+      fpsMetadataOverlay: document.getElementById("fpsMetadataOverlay"),
+      fpsScopeSelected: document.getElementById("fpsScopeSelected"),
+      fpsScopeAll: document.getElementById("fpsScopeAll"),
+      fpsScopeSelectedLabel: document.getElementById("fpsScopeSelectedLabel"),
+      fpsScopeAllLabel: document.getElementById("fpsScopeAllLabel"),
+      fpsMetadataSummary: document.getElementById("fpsMetadataSummary"),
+      fpsMetadataTarget: document.getElementById("fpsMetadataTarget"),
+      fpsPolicyExisting: document.getElementById("fpsPolicyExisting"),
+      fpsPolicySkip: document.getElementById("fpsPolicySkip"),
+      fpsPolicyIxml: document.getElementById("fpsPolicyIxml"),
+      fpsPolicyBext: document.getElementById("fpsPolicyBext"),
+      fpsPolicyBoth: document.getElementById("fpsPolicyBoth"),
+      fpsPolicyHint: document.getElementById("fpsPolicyHint"),
+      fpsMetadataExample: document.getElementById("fpsMetadataExample"),
+      fpsMetadataCancelBtn: document.getElementById("fpsMetadataCancelBtn"),
+      fpsMetadataPreviewBtn: document.getElementById("fpsMetadataPreviewBtn"),
+    };
+    const { chooseMetadataFormat, showConfirmDialog } = createDialogController(els);
+    const uiState = createUiStateController({ els });
+    const {
+      guarded,
+      log,
+      setState,
+      showToast,
+      updateWriteProgress,
+    } = uiState;
+    const fpsMetadata = createFpsMetadataController({ fpsInput: els.fpsInput });
+    const {
+      detectedMetadataFps,
+      fpsSelectLabel,
+      recordFps,
+      recordFpsDisplay,
+      recordFpsSource,
+      recordFpsValue,
+      setFpsValue,
+    } = fpsMetadata;
+    const confirmFlows = createConfirmFlows({ showConfirmDialog, fpsSelectLabel });
+    const {
+      confirmCombinePoly,
+      confirmLtcFpsMismatch,
+      confirmMetadataFpsMismatch,
+      confirmWriteChanges,
+    } = confirmFlows;
+
+    renderAppVersion(els.appVersionBadge);
+
+    let directoryHandle = null;
+    let records = [];
+    let previews = [];
+    let activeOffset = null;
+    let lastUndoBatch = null;
+    let ltcResults = new Map();
+    let ltcReports = new Map();
+    let takeGroupKeys = new Map();
+    let combinedPolyKeys = new Set();
+    let selectedRecordKeys = new Set();
+    let changedTimeReferences = new Map();
+
+    function groupKey(record) {
+      return groupKeyFor(record, takeGroupKeys);
+    }
+
+    function groupLabel(record) {
+      return groupLabelFor(record, takeGroupKeys);
+    }
+
+    function refreshTakeGroups() {
+      takeGroupKeys = detectTakeGroupKeys(records.filter(r => !r._meta && !r._video));
+    }
+
+    function isTakeTrack(record) {
+      return isTakeTrackFor(record, takeGroupKeys);
+    }
+
+    function combineEligibleGroups() {
+      return combineEligibleGroupsFor(records, takeGroupKeys);
+    }
+
+    function recordsByGroup() {
+      return recordsByGroupFor(records, takeGroupKeys);
+    }
+
+    const {
+      normalizeTimecodeInput,
+      stepTimecodeByFrames,
+      stepTimecodeAtCaret,
+      insertTimecodeDigits,
+      deleteTimecodeDigit,
+    } = createTimecodeInputController({
+      getFps: defaultDisplayFps,
+      getFpsValue: () => els.fpsInput.value,
+      onInvalidate: invalidatePreview,
+    });
+
+    const offsetInput = createOffsetInputController({
+      els,
+      normalizeTimecodeInput,
+      stepTimecodeByFrames,
+      stepTimecodeAtCaret,
+      insertTimecodeDigits,
+      deleteTimecodeDigit,
+      invalidatePreview,
+      log,
+    });
+
+    function displaySubFrameTimecode() {
+      return Boolean(els.preciseTimecodeInput?.checked);
+    }
+
+    function samplesToTimecode(samples, sampleRate, fps, options = {}) {
+      return formatSamplesToTimecode(samples, sampleRate, fps, {
+        ...options,
+        precise: options.precise ?? displaySubFrameTimecode(),
+      });
+    }
+
+    const calculator = createCalculatorController({
+      els,
+      log,
+      invalidatePreview,
+      normalizeTimecodeInput,
+      stepTimecodeByFrames,
+      stepTimecodeAtCaret,
+      insertTimecodeDigits,
+      deleteTimecodeDigit,
+      showToast,
+    });
+
+    function defaultDisplayFps() {
+      return parseFps(els.fpsInput.value);
+    }
+
+    const metadataExport = createMetadataExportController({
+      els,
+      chooseMetadataFormat,
+      getPreviews: () => previews,
+      getRecords: () => records,
+      getLtcResults: () => ltcResults,
+      parseFps,
+      recordKey,
+      recordFpsValue,
+      recordLabel,
+      samplesToTimecode,
+      setState,
+      log,
+    });
+
+    const diagnosticsPanel = createDiagnosticsPanel({
+      els,
+      groupLabelFor: record => groupLabel(record),
+      fpsSelectLabel,
+      samplesToTimecode,
+    });
+
+    const ltcController = createLtcController({
+      els,
+      getRecords: () => records,
+      getLtcResults: () => ltcResults,
+      setLtcResults: next => { ltcResults = next; },
+      getLtcReports: () => ltcReports,
+      setLtcReports: next => { ltcReports = next; },
+      recordsByGroup,
+      groupLabel,
+      fpsSelectLabel,
+      setFpsValue,
+      samplesToTimecode,
+      defaultDisplayFps,
+      confirmLtcFpsMismatch,
+      setState,
+      updateWriteProgress,
+      log,
+      renderRows: () => renderRows(),
+      renderDiagnostics: (reportsMap, options = {}) => {
+        diagnosticsPanel.render(reportsMap, { fpsValue: options.fpsValue || els.fpsInput.value });
+        updateFlowSteps();
+      },
+    });
+
+    const previewTable = createPreviewTableRenderer({
+      els,
+      getRecords: () => records,
+      getPreviews: () => previews,
+      getActiveOffset: () => activeOffset,
+      getLtcResults: () => ltcResults,
+      getChangedTimeReferences: () => changedTimeReferences,
+      getCombinedPolyKeys: () => combinedPolyKeys,
+      getSelectedRecordKeys: () => selectedRecordKeys,
+      setSelectedRecordKeys: keys => { selectedRecordKeys = keys; },
+      recordsByGroup,
+      isTakeTrack,
+      recordFps,
+      recordFpsSource,
+      recordFpsDisplay,
+      defaultDisplayFps,
+      samplesToTimecode,
+      ltcStartTimecode: ltcController.ltcStartTimecode,
+      ltcStatusText: ltcController.ltcStatusText,
+      combineEligibleGroups,
+      resolveMetadataItems: metadataExport.resolveMetadataItems,
+    });
+
+    function updateFlowSteps() {
+      const stepsEl = document.getElementById("flowSteps");
+      if (!stepsEl) return;
+      const hasFiles = records.length > 0;
+      const ltcDone = Array.from(ltcResults.values()).some(r => r && (r.ok || r.timecode));
+      const hasDiag = ltcReports.size > 0;
+      const hasOutput = combinedPolyKeys.size > 0 || changedTimeReferences.size > 0;
+      const states = {
+        import: hasFiles ? "done" : "active",
+        ltc: ltcDone ? "done" : hasFiles ? "active" : "idle",
+        diag: hasDiag ? "done" : ltcResults.size > 0 ? "active" : "idle",
+        output: hasOutput ? "done" : hasDiag ? "active" : "idle",
+      };
+      for (const step of stepsEl.querySelectorAll(".step")) {
+        step.dataset.state = states[step.dataset.step] || "idle";
+      }
+    }
+
+    function renderRows() {
+      previewTable.renderRows();
+      updateFlowSteps();
+    }
+
+    const polyCombine = createPolyCombineController({
+      els,
+      combineEligibleGroups,
+      confirmCombinePoly,
+      getPreviews: () => previews,
+      getLtcResults: () => ltcResults,
+      shouldMuteLtc: () => els.muteLtcInput.checked,
+      groupLabel,
+      getFpsValue: () => els.fpsInput.value,
+      setCombinedPolyKeys: keys => { combinedPolyKeys = keys; },
+      setState,
+      updateWriteProgress,
+      log,
+      renderRows,
+    });
+
+    const timeReferenceWrite = createTimeReferenceWriteController({
+      els,
+      getDirectoryHandle: () => directoryHandle,
+      getRecords: () => records,
+      setRecords: next => { records = next; },
+      getPreviews: () => previews,
+      setPreviews: next => { previews = next; },
+      getActiveOffset: () => activeOffset,
+      setActiveOffset: next => { activeOffset = next; },
+      getLastUndoBatch: () => lastUndoBatch,
+      setLastUndoBatch: next => { lastUndoBatch = next; },
+      getLtcResults: () => ltcResults,
+      shouldMuteLtc: () => els.muteLtcInput.checked,
+      setChangedTimeReferences: next => { changedTimeReferences = next; },
+      refreshTakeGroups,
+      offsetInput,
+      recordFpsValue,
+      recordFpsSource,
+      recordFpsDisplay,
+      fpsSelectLabel,
+      recordFps,
+      samplesToTimecode,
+      confirmWriteChanges,
+      setState,
+      updateWriteProgress,
+      log,
+      renderRows,
+    });
+
+    const fpsWrite = createFpsWriteController({
+      els,
+      getRecords: () => records,
+      getSelectedRecordKeys: () => selectedRecordKeys,
+      getPreviews: () => previews,
+      setPreviews: next => { previews = next; },
+      setActiveOffset: next => { activeOffset = next; },
+      getLastUndoBatch: () => lastUndoBatch,
+      setLastUndoBatch: next => { lastUndoBatch = next; },
+      recordFps,
+      recordFpsDisplay,
+      fpsSelectLabel,
+      samplesToTimecode,
+      showConfirmDialog,
+      refreshRecordsFromHandles: timeReferenceWrite.refreshRecordsFromHandles,
+      setChangedTimeReferences: next => { changedTimeReferences = next; },
+      setState,
+      updateWriteProgress,
+      renderRows,
+      log,
+    });
+
+    function invalidatePreview() {
+      fpsWrite.resetPreviewMode();
+      if (!records.length || !previews.length) {
+        renderRows();
+        return;
+      }
+      previews = [];
+      activeOffset = null;
+      els.applyBtn.disabled = true;
+      setState("需重新预览", "warn");
+      els.statusLine.textContent = "偏移或帧率已改变，请重新点击预览";
+      renderRows();
+    }
+
+    function resetListState() {
+      records = [];
+      previews = [];
+      activeOffset = null;
+      lastUndoBatch = null;
+      ltcResults = new Map();
+      ltcReports = new Map();
+      takeGroupKeys = new Map();
+      combinedPolyKeys = new Set();
+      selectedRecordKeys = new Set();
+      changedTimeReferences = new Map();
+      directoryHandle = null;
+      els.applyBtn.disabled = true;
+      els.undoBtn.disabled = true;
+      els.previewBtn.disabled = true;
+      els.extractLtcBtn.disabled = true;
+      els.extractLtcFallbackBtn.disabled = true;
+      els.exportMetadataBtn.disabled = true;
+      els.fpsMetadataBtn.disabled = true;
+      els.combinePolyBtn.disabled = true;
+      els.writeLtcBtn.disabled = true;
+      fpsWrite.resetPreviewMode();
+      diagnosticsPanel.render(ltcReports, {});
+      setState("待机");
+      els.statusLine.textContent = "拖入 WAV / MOV / MP4 / ALE / CSV 文件后显示原始信息";
+      log("List cleared.");
+      renderRows();
+    }
+
+    function removeSelectedRecords() {
+      if (!selectedRecordKeys.size) return;
+      const removeKeys = new Set(selectedRecordKeys);
+      const before = records.length;
+      records = records.filter(record => !removeKeys.has(recordKey(record)));
+      previews = previews.filter(preview => !removeKeys.has(recordKey(preview)));
+      for (const key of removeKeys) {
+        ltcResults.delete(key);
+        changedTimeReferences.delete(key);
+        combinedPolyKeys.delete(key);
+      }
+      for (const [takeKey, entry] of Array.from(ltcReports)) {
+        entry.groupRecords = (entry.groupRecords || []).filter(record => !removeKeys.has(recordKey(record)));
+        if (!entry.groupRecords.length) ltcReports.delete(takeKey);
+      }
+      diagnosticsPanel.render(ltcReports, { fpsValue: els.fpsInput.value });
+      selectedRecordKeys = new Set();
+      activeOffset = previews.length ? activeOffset : null;
+      if (!records.length) {
+        resetListState();
+        return;
+      }
+      refreshTakeGroups();
+      if (!fpsWrite.previewIsFpsMetadata()) fpsWrite.resetPreviewMode();
+      els.applyBtn.disabled = previews.length === 0;
+      els.undoBtn.disabled = !lastUndoBatch;
+      els.previewBtn.disabled = false;
+      els.extractLtcBtn.disabled = records.filter(record => !record._meta).length === 0;
+      els.exportMetadataBtn.disabled = true;
+      setState("已移除");
+      els.statusLine.textContent = `已从列表移除 ${before - records.length} 项`;
+      log(`Removed ${before - records.length} selected item(s).`);
+      renderRows();
+    }
+
+    els.previewBtn.addEventListener("click", () => guarded(async () => {
+      fpsWrite.resetPreviewMode();
+      await timeReferenceWrite.runPreview();
+    }));
+    els.applyBtn.addEventListener("click", () => guarded(
+      fpsWrite.previewIsFpsMetadata() ? fpsWrite.applyChanges : timeReferenceWrite.applyChanges
+    ));
+    els.undoBtn.addEventListener("click", () => guarded(
+      lastUndoBatch?.type === "fps-metadata" ? fpsWrite.undoLastWrite : timeReferenceWrite.undoLastWrite
+    ));
+    els.extractLtcBtn.addEventListener("click", () => guarded(ltcController.extractLtcFromFiles));
+    els.extractLtcFallbackBtn.addEventListener("click", () => guarded(() => ltcController.extractLtcFromFiles({
+      allowSoftSync: true,
+      selectedRecordKeys,
+    })));
+    els.exportMetadataBtn.addEventListener("click", () => guarded(metadataExport.exportMetadata));
+    els.combinePolyBtn.addEventListener("click", () => guarded(polyCombine.combinePolyFiles));
+    els.writeLtcBtn.addEventListener("click", () => guarded(timeReferenceWrite.writeLtcTimecode));
+    els.removeSelectedBtn.addEventListener("click", () => guarded(removeSelectedRecords));
+    els.clearListBtn.addEventListener("click", () => guarded(resetListState));
+    calculator.bindEvents({ guarded });
+    offsetInput.bindEvents();
+    fpsWrite.bindEvents({ guarded });
+
+    initCustomSelect(els.fpsInput, els.fpsSelectButton, els.fpsSelectMenu);
+
+    els.fpsInput.addEventListener("change", () => {
+      normalizeTimecodeInput(els.offsetInput);
+      normalizeTimecodeInput(els.calcStartInput, null, false);
+      normalizeTimecodeInput(els.calcEndInput, null, false);
+      calculator.refreshCalculator();
+      renderRows();
+    });
+
+    els.preciseTimecodeInput.addEventListener("change", () => {
+      renderRows();
+    });
+
+    if (!("showDirectoryPicker" in window)) {
+      setState("浏览器不支持", "warn");
+      els.statusLine.textContent = "Chrome / Edge recommended；也可以尝试直接拖入 WAV / MOV / MP4 / ALE / CSV 文件夹";
+      els.previewBtn.disabled = true;
+    }
+
+    const fileImport = createFileImportController({
+      els,
+      scanWave,
+      scanVideo,
+      wavSuffix: WAV_SUFFIX,
+      videoSuffix: VIDEO_SUFFIX,
+      metadataSuffix: METADATA_SUFFIX,
+      parseMetadataImport,
+      setDirectoryHandle: handle => { directoryHandle = handle; },
+      getRecords: () => records,
+      pushRecord: record => records.push(record),
+      clearAfterImportState: count => {
+        lastUndoBatch = null;
+        ltcResults = new Map();
+        ltcReports = new Map();
+        diagnosticsPanel.render(ltcReports, {});
+        selectedRecordKeys = new Set();
+        if (count === 0) { changedTimeReferences = new Map(); combinedPolyKeys = new Set(); }
+      },
+      refreshTakeGroups,
+      takeGroupCount: () => takeGroupCount(takeGroupKeys),
+      combineEligibleGroups,
+      detectedMetadataFps,
+      fpsDiffersFromUi: fpsMetadata.differsFromUi,
+      fpsInput: els.fpsInput,
+      setFpsValue,
+      fpsSelectLabel,
+      confirmMetadataFpsMismatch,
+      renderRows,
+      setState,
+      log,
+      guarded,
+    });
+
+    calculator.refreshCalculator();
+    setupPwa({ installBtn: els.installBtn, log });
+    fileImport.setupDragAndDrop();
+  </script>
+</body>
+</html>

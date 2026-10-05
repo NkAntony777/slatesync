@@ -1,0 +1,296 @@
+{
+  "project": "SlateSync",
+  "validatedOn": "2026-10-05",
+  "application": "DaVinci Resolve",
+  "version": "20.3.3.10",
+  "platform": "Windows",
+  "source": "Synthetic fixtures: 8 seconds, 25 fps, 48 kHz. Not production footage.",
+  "allChecksPassed": true,
+  "checkCount": 20,
+  "imports": {
+    "resolve_discrete4.wav": {
+      "ok": true,
+      "channels": "4",
+      "startTimecode": "01:00:00:00",
+      "fps": 25.0,
+      "audioMapping": {
+        "embedded_audio_channels": 4,
+        "linked_audio": {},
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "mute": false,
+            "type": "自适应_4"
+          }
+        }
+      }
+    },
+    "resolve_iso2.wav": {
+      "ok": true,
+      "channels": "2",
+      "startTimecode": "01:00:00:00",
+      "fps": 25.0,
+      "audioMapping": {
+        "embedded_audio_channels": 2,
+        "linked_audio": {},
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              1,
+              2
+            ],
+            "mute": false,
+            "type": "stereo"
+          }
+        }
+      }
+    },
+    "sidus_ltc5.wav": {
+      "ok": true,
+      "channels": "5",
+      "startTimecode": "01:00:00:00",
+      "fps": 25.0,
+      "audioMapping": {
+        "embedded_audio_channels": 5,
+        "linked_audio": {},
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "mute": false,
+            "type": "自适应_5"
+          }
+        }
+      }
+    },
+    "syncaila_ref.wav": {
+      "ok": true,
+      "channels": "1",
+      "startTimecode": "01:00:00:00",
+      "fps": 25.0,
+      "audioMapping": {
+        "embedded_audio_channels": 1,
+        "linked_audio": {},
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              1
+            ],
+            "mute": false,
+            "type": "mono"
+          }
+        }
+      }
+    }
+  },
+  "sync": [
+    {
+      "test": "timecode_replace",
+      "ok": true,
+      "retainedCameraAudio": false,
+      "audioMapping": {
+        "embedded_audio_channels": 1,
+        "linked_audio": {
+          "1": {
+            "channels": 4,
+            "offset": 0,
+            "file": "resolve_discrete4.wav"
+          }
+        },
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              2,
+              3,
+              4,
+              5
+            ],
+            "mute": false,
+            "type": "自适应_4"
+          }
+        }
+      }
+    },
+    {
+      "test": "timecode_retain",
+      "ok": true,
+      "retainedCameraAudio": true,
+      "audioMapping": {
+        "embedded_audio_channels": 1,
+        "linked_audio": {
+          "1": {
+            "channels": 4,
+            "offset": 0,
+            "file": "resolve_discrete4.wav"
+          }
+        },
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              1
+            ],
+            "mute": false,
+            "type": "mono"
+          },
+          "2": {
+            "channel_idx": [
+              2,
+              3,
+              4,
+              5
+            ],
+            "mute": false,
+            "type": "自适应_4"
+          }
+        }
+      }
+    },
+    {
+      "test": "waveform_program_poly",
+      "ok": true,
+      "retainedCameraAudio": false,
+      "audioMapping": {
+        "embedded_audio_channels": 1,
+        "linked_audio": {
+          "1": {
+            "channels": 4,
+            "offset": 0,
+            "file": "resolve_discrete4.wav"
+          }
+        },
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              2,
+              3,
+              4,
+              5
+            ],
+            "mute": false,
+            "type": "自适应_4"
+          }
+        }
+      }
+    },
+    {
+      "test": "waveform_mono_reference",
+      "ok": true,
+      "retainedCameraAudio": false,
+      "audioMapping": {
+        "embedded_audio_channels": 1,
+        "linked_audio": {
+          "1": {
+            "channels": 1,
+            "offset": 0,
+            "file": "syncaila_ref.wav"
+          }
+        },
+        "track_mapping": {
+          "1": {
+            "channel_idx": [
+              2
+            ],
+            "mute": false,
+            "type": "mono"
+          }
+        }
+      }
+    }
+  ],
+  "checks": [
+    {
+      "test": "resolve_discrete4.wav: channel count",
+      "ok": true
+    },
+    {
+      "test": "resolve_discrete4.wav: timecode",
+      "ok": true
+    },
+    {
+      "test": "resolve_discrete4.wav: contiguous mapping",
+      "ok": true
+    },
+    {
+      "test": "resolve_iso2.wav: channel count",
+      "ok": true
+    },
+    {
+      "test": "resolve_iso2.wav: timecode",
+      "ok": true
+    },
+    {
+      "test": "resolve_iso2.wav: contiguous mapping",
+      "ok": true
+    },
+    {
+      "test": "sidus_ltc5.wav: channel count",
+      "ok": true
+    },
+    {
+      "test": "sidus_ltc5.wav: timecode",
+      "ok": true
+    },
+    {
+      "test": "sidus_ltc5.wav: contiguous mapping",
+      "ok": true
+    },
+    {
+      "test": "syncaila_ref.wav: channel count",
+      "ok": true
+    },
+    {
+      "test": "syncaila_ref.wav: timecode",
+      "ok": true
+    },
+    {
+      "test": "syncaila_ref.wav: contiguous mapping",
+      "ok": true
+    },
+    {
+      "test": "timecode_replace: linked source and zero offset",
+      "ok": true
+    },
+    {
+      "test": "timecode_replace: only expected tracks",
+      "ok": true
+    },
+    {
+      "test": "timecode_retain: linked source and zero offset",
+      "ok": true
+    },
+    {
+      "test": "timecode_retain: only expected tracks",
+      "ok": true
+    },
+    {
+      "test": "waveform_program_poly: linked source and zero offset",
+      "ok": true
+    },
+    {
+      "test": "waveform_program_poly: only expected tracks",
+      "ok": true
+    },
+    {
+      "test": "waveform_mono_reference: linked source and zero offset",
+      "ok": true
+    },
+    {
+      "test": "waveform_mono_reference: only expected tracks",
+      "ok": true
+    }
+  ],
+  "limitations": [
+    "No Sidus, PluralEyes or Syncaila application-level verification.",
+    "No guarantee for arbitrary production footage, large RF64 or long-duration clock drift."
+  ]
+}

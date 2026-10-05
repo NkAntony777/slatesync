@@ -1,0 +1,229 @@
+<div align="center">
+  <img src="bwf-timecode-icon.svg" alt="SlateSync icon" width="88" />
+  <h1>SlateSync</h1>
+  <p><strong>把声音时码拉回正轨，让声画合板更清楚。</strong></p>
+  <p>Local-first LTC decoding, BWF timecode repair, and workflow-ready Poly WAV export.</p>
+  <p><a href="#快速开始">快速开始</a> · <a href="#命令行导出">命令行导出</a> · <a href="#验证与兼容性">验证与兼容性</a> · <a href="#english">English</a> · <a href="LICENSE">MIT License</a></p>
+</div>
+
+---
+
+**SlateSync** 是面向双系统录音、ZOOM H 系列分轨和后期声画同步的本地工具。它从音轨中读取 LTC，推算文件起始时间码，编辑 WAV/BWF 元数据，并把同一 take 的节目音轨打包为 Poly WAV。
+
+浏览器版使用原生 HTML/CSS/JavaScript，没有后端或 npm 构建步骤。文件解析、LTC 分析与导出在本机完成；命令行导出也只处理本地文件。
+
+> **重要：`index.html` 不是独立可分发的单文件程序。**
+> 需要保留完整应用资源，并通过本地 HTTP 服务或 HTTPS 网站打开。只下载 HTML、或直接双击它，不是当前支持的运行方式。
+>
+> **重要素材先备份。**“合并 Poly”生成新文件，但直接写回时码会修改源 WAV；静音源 LTC 通道后，撤销按钮不能恢复音频内容。
+
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| LTC 解码 | 扫描音轨中的时码信号，根据锁帧位置倒推文件起始时间码；支持增强识别与 Worker 分析 |
+| 低电平恢复与诊断 | 只对分析副本增益，保留原始电平；成功提示复核，失败提供原因与建议 |
+| WAV/BWF 时间码 | 查看、偏移和写入 `bext.TimeReference` / iXML 时间戳，提供修改预览与元数据撤销 |
+| Take 分组 | 按分轨文件名主干分组，适合 `ZOOM0001_Tr1.WAV`、`Tr2`、`LR` 等结构 |
+| Poly WAV | 连续通道映射、iXML track list、离散多通道布局；可排除已确认的 LTC 技术轨 |
+| 工作流导出 | Resolve、Sidus、PluralEyes、Syncaila、Archive 文件策略；可选 mono SyncRef 与中文合板说明 |
+| 视频与元数据 | 读取支持的 MOV/MP4 时间码，导入/导出 CSV、ALE 元数据 |
+| PWA | 安装与离线缓存机制；成功在线加载并缓存后可离线运行 |
+
+支持的 WAV 解析路径包括 RIFF、RF64、BW64、PCM、IEEE Float 和 WAVEFORMATEXTENSIBLE。具体素材能否处理仍取决于格式与信号质量，不代表所有设备、视频编码或大文件都经过实测。
+
+## 快速开始
+
+### 1. 获取项目
+
+```bash
+git clone https://github.com/NkAntony777/slatesync.git
+cd slatesync
+```
+
+也可以使用 GitHub 的 **Code → Download ZIP**，解压后进入项目目录。
+
+### 2. 启动本地服务
+
+安装 Python 3 后，在项目根目录执行：
+
+```bash
+python -m http.server 8765 --bind 127.0.0.1
+```
+
+macOS/Linux 上，如果命令是 `python3`，请改用：
+
+```bash
+python3 -m http.server 8765 --bind 127.0.0.1
+```
+
+用 **Chrome 或 Edge** 打开：
+
+```text
+http://127.0.0.1:8765/
+```
+
+网页本身不需要安装 Node.js、FFmpeg 或 DaVinci Resolve。直接读写本地文件需要浏览器支持相应文件访问 API，并由用户授权。
+
+### 3. 试用合成素材（可选）
+
+安装 **Node.js 24+** 后：
+
+```bash
+node test/gen-demo.mjs demo
+```
+
+生成的 `demo/FOLDER01` 包含正常 LTC、延迟接入、无 LTC 和低电平 LTC 的演示 take。它们是合成测试信号，不是真实拍摄素材；生成文件不随源码仓库发布。
+
+## 典型工作流
+
+```text
+FOLDER01/
+  ZOOM0001_Tr1.WAV   节目音轨
+  ZOOM0001_Tr2.WAV   节目音轨
+  ZOOM0001_Tr6.WAV   已确认录入 LTC 的音轨
+```
+
+1. 把文件或文件夹拖入页面，检查 take 分组和素材参数。
+2. 选择正确帧率，注意 **23.976 ≠ 24、29.97 ≠ 30**，以及 DF/NDF。
+3. 点击 **从音轨提取时码**，查看成功结果与诊断报告。
+4. 对低电平、低质量、帧率不符的结果进行人工交叉复核；无法锁定时不要把猜测当正确时码。
+5. 点击 **合并 Poly WAV**，选择使用 LTC、预览或原始时间码。
+6. 默认 Resolve 清洁方案在启用 LTC 清理时，会移除**已确认**的 LTC 通道，不留下静音空轨；源分轨不受合并操作影响。
+7. 在目标剪辑软件中检查通道映射和同步，并核对开头、中段与结尾。
+
+> 文件名 `Tr6` 不等于 LTC。必须由检测或用户确认通道来源。
+> 静音、小电平、LR 混音和 ISO 都不能自动等同于“无用音轨”。
+
+## 命令行导出
+
+软件方案选择、显式音轨选择和 SyncRef 已有数据层/CLI 接口，**当前网页没有对应的完整选择控件**。需要这些功能时可使用命令行：
+
+```bash
+node scripts/export-sync-package.mjs --help
+```
+
+例如，读取低电平演示 take，只输出节目轨并生成独立 mono 参考文件：
+
+```bash
+node scripts/export-sync-package.mjs --input demo/FOLDER01 --output output/ZOOM0004 --take ZOOM0004 --profile resolve --auto-ltc --channels ZOOM0004_Tr1.WAV:1 --reference ZOOM0004_Tr1.WAV:1
+```
+
+| 方案 | 用途 | LTC 策略 | 输出编码 |
+|---|---|---|---|
+| `resolve` | 清洁节目 Poly | 排除已确认的 LTC 通道 | PCM24 |
+| `sidus` | 继续保留技术轨以读取 LTC | 保留 | PCM24 |
+| `pluraleyes` | 波形比较与参考声工作流 | 排除已确认的 LTC 通道 | PCM24 |
+| `syncaila` | 波形/XML 工作流与参考声 | 排除已确认的 LTC 通道 | PCM24 |
+| `archive` | 保留来源编码的归档副本 | 保留；网页旧静音选项可继续生效 | 来源编码 |
+
+CLI 每次处理一个 take，读取输入文件夹第一层 WAV。通道参数使用 **1-based** 编号；输出目录必须在输入目录之外。默认不覆盖已有输出，自动 LTC 失败时默认拒绝输出。
+
+导出可包含：
+
+```text
+ZOOM0004_resolve_Poly.WAV
+ZOOM0004_resolve_SyncRef.WAV       可选，辅助参考，不是新增节目轨
+ZOOM0004_resolve_合板说明.txt
+ZOOM0004_resolve_channels.json
+```
+
+PCM24 方案不会重采样。Float 超过 0 dBFS 转定点可能削波，导出结果会报告削波/非有限样本；这类素材应先降低增益或使用 Archive 保留原始编码。
+
+完整用法：[命令行交付指南](scripts/README-sync-package.md)。
+
+## DaVinci Resolve 合板要点
+
+- 在 **Clip Attributes → Audio** 检查节目通道；需要独立麦克风轨时按 Mono 离散映射。
+- 本机实测中，4/5 通道默认导入为 Adaptive，双通道为 Stereo，**不会自动变成多条 Mono 轨**。
+- 共同时码可信时使用 **Auto Sync Audio → Timecode**。
+- 波形同步需要摄影机与录音机录到相同现场声音，comparison channel 不能是 LTC 或静音轨。
+- **Retain embedded audio** 会额外保留摄影机原始音轨；不需要参考声时关闭，不能把这些轨误认为 Poly 多余通道。
+- 不要同时把同一 take 的主 Poly、原始分轨和 SyncRef 当成不同录音合板；也不要无意叠加 LR mix 与全部 ISO。
+
+详细说明：[中文声音合板指南](docs/声音合板指南.md)。
+
+## 验证与兼容性
+
+2026-10-05 的验证记录：
+
+| 范围 | 结果 | 能证明什么 |
+|---|---|---|
+| 新增数据层回归测试 | 26 项通过 | 低电平 LTC、负样本、主线程/Worker、WAV 布局、PCM24、通道选择、失败写入处理 |
+| 既有集成测试 | 26 项检查通过 | 合成信号、take 分组、诊断、Poly 输出等场景 |
+| DaVinci Resolve 20.3.3.10 / Windows | 20 项检查通过 | 合成素材导入与时码/波形同步，通道、起始时码和偏移验证 |
+| 浏览器与 PWA | Worker 解码、断网刷新通过 | 当前本地验证环境的脚本和缓存路径 |
+| Sidus / PluralEyes / Syncaila | **尚未软件端实测** | 仅提供文件策略和流程说明，不等于兼容认证 |
+
+Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原声、主 Poly 波形同步、Mono SyncRef 波形同步。
+
+公开摘要：[Resolve 20.3.3 验证结果](docs/validation/resolve-20.3.3.json)。原始报告、测试视频和 WAV 可用 `scripts/resolve/` 中的脚本在本地重新生成，不包含在源码发布中。
+
+**未覆盖**所有真实拍摄素材、所有设备、全部帧率、真实超 4 GB RF64、长素材漂移，或另外三款软件的实际往返。自动增益不能恢复量化归零、噪声淹没和严重失真的信息；固定时间码偏移也不能解决持续时钟漂移。
+
+## 分发与部署
+
+| 方式 | 用户需要什么 | 当前状态 |
+|---|---|---|
+| 源码 ZIP / Git clone | 完整目录 + 本地 HTTP 服务 | 可用 |
+| 静态网站 / GitHub Pages | 浏览器；初次加载需要网络 | 可部署，推送源码本身不等于已启用 Pages |
+| PWA 离线使用 | 先成功加载并缓存应用 | 已有机制；浏览器缓存仍可能被清理 |
+| 单个 HTML 双击运行 | 所有代码需另行打包并验证文件权限 | **当前不支持** |
+| 双击即用桌面/便携包 | 本地服务启动器或桌面封装 | **尚未提供** |
+
+静态部署需要至少保留 `index.html`、完整 `src/`、Service Worker、manifest 和图标，不能只上传 HTML。仓库包含 `.nojekyll`，可用于普通静态资源发布。
+
+## 安全与隐私
+
+- 默认应用流程没有音视频上传后端，媒体处理在本机进行。
+- 在线部署只托管应用资源；浏览器授权与素材读写仍在用户机器上。请自行评估所使用的托管服务及浏览器环境。
+- 直接写回 BWF 时码会修改源文件；先备份，再预览和确认。
+- **撤销是元数据恢复，不是完整文件备份。静音源 LTC 音频不能通过撤销恢复。**
+- 合并操作不修改源分轨，但网页批量输出可能覆盖目标目录中的同名文件；CLI 默认拒绝覆盖。
+- SyncRef 是辅助比较声音，不能误当成新增制作轨叠加播放。
+
+## 开发与测试
+
+Node.js 24+；本次验证使用 Node.js 24.12.0。核心回归测试不需要安装 npm 依赖：
+
+```bash
+node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs
+node test/run-tests.mjs
+```
+
+Resolve 软件端验证额外需要安装并运行 Resolve、配置可用的 Python 脚本接口，视频样本生成需要 FFmpeg。详见 [Resolve 验证说明](scripts/resolve/README.md)。这些不是网页使用的前提。
+
+```text
+index.html                         网页入口与控制器组装
+src/
+  timecode.js                      BigInt / 分数时间码计算
+  ltc-decoder.js / ltc-worker.js    LTC 分析与 Worker
+  ltc-signal.js                    分析增益和失败分类
+  ltc-diagnostics.js               诊断与建议
+  wave*.js                         WAV/BWF 解析与写入
+  poly-export-profiles.js          输出方案与通道策略
+  sync-workflow.js                 中文交付说明和通道清单
+scripts/
+  export-sync-package.mjs          本地命令行导出
+  resolve/                         Resolve 合成素材与 API 验证
+test/                              合成器、回归测试、集成检查
+docs/                              合板指南、接入接口、验证摘要
+```
+
+问题反馈请附上帧率/DF 设置、录音设备、格式/位深/通道数、诊断信息和复现步骤。涉及原始素材时，优先提供经授权的最小复现样本；不要公开私密录音。
+
+## 致谢与许可
+
+SlateSync 基于 [xnpeter / Audio TC Change](https://github.com/xnpeter/Audio-TC-Change) 二次开发，保留上游 **MIT License** 与原始版权声明。感谢上游提供的 WAV/BWF 时间码、LTC、视频元数据与本地工作流基础。
+
+本项目继续以 [MIT License](LICENSE) 发布。DaVinci Resolve、Sidus、PluralEyes、Syncaila 等名称属于各自权利人；提及工作流不表示厂商背书或认证。
+
+## English
+
+**SlateSync** is a local-first toolkit for LTC decoding, WAV/BWF timecode repair, split-track grouping, and Poly WAV delivery. It includes signal diagnostics, analysis-only low-level gain, explicit channel selection, optional mono sync references, and readable workflow sidecars.
+
+- **Run the web app:** clone the complete repository, run `python -m http.server 8765 --bind 127.0.0.1`, then open `http://127.0.0.1:8765/` in Chrome or Edge. The HTML file is **not** a standalone distributable.
+- **Use export presets:** `node scripts/export-sync-package.mjs --help`. Advanced preset/channel controls are available through the CLI/data API, not yet as complete web UI controls.
+- **Validated:** synthetic-fixture import and timecode/waveform sync in DaVinci Resolve 20.3.3.10 on Windows. This is not certification for all footage or other applications.
+- **Protect your originals:** in-place metadata writes modify source WAVs; muting source LTC audio cannot be undone by the metadata undo button.
+- **License:** MIT, derived from Audio TC Change with upstream attribution preserved.
