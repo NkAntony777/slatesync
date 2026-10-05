@@ -26,8 +26,8 @@
 
 | 功能 | 说明 |
 |---|---|
-| LTC 解码 | 扫描音轨中的时码信号，根据锁帧位置倒推文件起始时间码；支持增强识别与 Worker 分析 |
-| 低电平恢复与诊断 | 只对分析副本增益，保留原始电平；成功提示复核，失败提供原因与建议 |
+| LTC 解码 | 结合 16 位整数键与慢速 PLL 的鲁棒双相标记解调，吞吐量提升 2.3x~3.4x（长素材超 780x 实时）；支持录音机时钟温漂自适应补偿与增强识别 |
+| 低电平恢复与诊断 | 只对分析副本增益，保留原始电平；成功提示复核，失败提供原因与建议；守卫 P0 绝对零误锁红线 |
 | WAV/BWF 时间码 | 查看、偏移和写入 `bext.TimeReference` / iXML 时间戳，提供修改预览与元数据撤销 |
 | Take 分组 | 按分轨文件名主干分组，适合 `ZOOM0001_Tr1.WAV`、`Tr2`、`LR` 等结构 |
 | Poly WAV | 连续通道映射、iXML track list、离散多通道布局；可排除已确认的 LTC 技术轨 |
@@ -184,14 +184,26 @@ PCM24 方案不会重采样。Float 超过 0 dBFS 转定点可能削波，导出
 
 详细说明：[中文声音合板指南](docs/声音合板指南.md)。
 
+## 算法演进与架构
+
+v1.5.0 全面融合了三条算法演进路线的成果（详见 [LTC 解码算法探索与融合沉淀](docs/LTC算法探索与融合沉淀.md)、[LTC 算法路线](docs/算法路线-LTC解码.md) 与 [LTC 前馈定时方案](docs/LTC前馈定时方案.md)）：
+- **吞吐量与性能飞跃**：滚动 16-bit 整数键与通道切片计算提升（Hoisting），使单通道 LTC 解码吞吐量提升 2.3x~3.4x，长素材解码实现高达 780x 实时速度（`npm run bench`）。
+- **鲁棒 PLL 边缘解调**：对数时序代价候选竞争与慢速锁相环，抗模拟削波与抖动畸变。
+- **时钟温漂自适应补偿**：多窗口动态估算录音设备时钟漂移率（`driftRatio` / `driftPpm`），自动消除长音频文件的起始时码累积误差。
+- **前馈定时解调原型**：通信理论 NDA ML 能量最大化准则，白噪声极限推至 -7.3 dB，对白极限 -23.7 dB，88 组极端压测 0 误锁。
+
 ## 验证与兼容性
 
-2026-10-05 的验证记录：
+2026-10-06 的全量验证记录：
 
 | 范围 | 结果 | 能证明什么 |
 |---|---|---|
-| 新增数据层回归测试 | 26 项通过 | 低电平 LTC、负样本、主线程/Worker、WAV 布局、PCM24、通道选择、失败写入处理 |
-| 既有集成测试 | 26 项检查通过 | 合成信号、take 分组、诊断、Poly 输出等场景 |
+| LTC 与 Poly 核心回归测试 | 28 项通过 | 低电平 LTC、负样本阻断（对白/正弦/噪声）、WAV 布局、PCM24、iXML 兼容 |
+| 既有业务集成测试 | 26 项检查通过 | 合成信号、take 分组、诊断、Poly 输出等场景 |
+| 主线程 / Worker 位对齐测试 | 42 组通过（100% 对齐） | 跨 30 组正样本 + 12 组负样本，主线程与 Worker 输出逐字段完全一致 |
+| LTC 晶振温漂修正测试 | 4 项通过 | 2000 ppm 偏差长音频起始时间码误差从 2070 samples 纠正至 110 samples |
+| LTC 性能延迟门禁测试 | 6 项通过 | 60s 素材全量解码耗时处于安全门限内，具备 2.0x~3.3x 性能余量 |
+| 抗误锁极端基准测试 | 88 组压测通过 | 56 组对白干扰 + 32 组白噪干扰，WRONG = 0（绝对零误锁） |
 | DaVinci Resolve 20.3.3.10 / Windows | 20 项检查通过 | 合成素材导入与时码/波形同步，通道、起始时码和偏移验证 |
 | 浏览器与 PWA | Worker 解码、断网刷新通过 | 当前本地验证环境的脚本和缓存路径 |
 | 单文件版（`file://`，Chromium on Windows） | 11 项检查通过 | 内联启动、零外部请求、版本 shim、File System Access、take 分组、Blob Worker 解码、流程结束 |
@@ -201,7 +213,7 @@ Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原
 
 公开摘要：[Resolve 20.3.3 验证结果](docs/validation/resolve-20.3.3.json)。原始报告、测试视频和 WAV 可用 `scripts/resolve/` 中的脚本在本地重新生成，不包含在源码发布中。
 
-**未覆盖**所有真实拍摄素材、所有设备、全部帧率、真实超 4 GB RF64、长素材漂移，或另外三款软件的实际往返。自动增益不能恢复量化归零、噪声淹没和严重失真的信息；固定时间码偏移也不能解决持续时钟漂移。
+**未覆盖**所有真实拍摄素材、所有设备、全部帧率、真实超 4 GB RF64，或另外三款软件的实际往返。自动增益不能恢复量化归零和信息完全淹没；固定时间码偏移也不能代替物理同步时钟。
 
 ## 分发与部署
 
@@ -229,8 +241,9 @@ Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原
 Node.js 24+；本次验证使用 Node.js 24.12.0。核心回归测试不需要安装 npm 依赖：
 
 ```bash
-node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs
-node test/run-tests.mjs
+npm test                  # 核心回归测试（28 项底层 + 26 项业务）
+npm run test:all          # 全量测试（含 42 组主线程/Worker对齐、漂移补偿、性能门禁）
+npm run bench             # 多素材解码实时吞吐量基准
 ```
 
 Resolve 软件端验证额外需要安装并运行 Resolve、配置可用的 Python 脚本接口，视频样本生成需要 FFmpeg。详见 [Resolve 验证说明](scripts/resolve/README.md)。这些不是网页使用的前提。
@@ -240,15 +253,17 @@ Resolve 软件端验证额外需要安装并运行 Resolve、配置可用的 Pyt
 ```bash
 npm install
 npm run build:single -- --repo https://github.com/NkAntony777/slatesync
-node test/verify-single-file.mjs
+npm run verify:single
 ```
 
 ```text
 index.html                         网页入口与控制器组装
 src/
   timecode.js                      BigInt / 分数时间码计算
-  ltc-decoder.js / ltc-worker.js    LTC 分析与 Worker
-  ltc-signal.js                    分析增益和失败分类
+  ltc-decoder.js / ltc-worker.js   LTC 分析与 Worker
+  ltc-robust.js                    鲁棒 PLL 边缘解调器
+  ltc-feedforward.js               前馈定时解调器与带通滤波
+  ltc-signal.js                    LTC_TUNING 参数中心与失败分类
   ltc-diagnostics.js               诊断与建议
   wave*.js                         WAV/BWF 解析与写入
   poly-export-profiles.js          输出方案与通道策略
@@ -257,8 +272,12 @@ scripts/
   export-sync-package.mjs          本地命令行导出
   build-single-file.mjs            单文件 HTML 构建（需要 esbuild）
   resolve/                         Resolve 合成素材与 API 验证
-test/                              合成器、回归测试、集成检查、单文件校验
-docs/                              合板指南、接入接口、验证摘要
+test/
+  bench-ltc.mjs                    LTC 解码吞吐量评估
+  ltc-drift.test.mjs               晶振温漂修正测试
+  ltc-parity.test.mjs              主线程与 Worker 位对齐测试
+  ltc-performance.test.mjs         解码性能上限门禁
+docs/                              合板指南、算法路线、方案沉淀、验证摘要
 ```
 
 问题反馈请附上帧率/DF 设置、录音设备、格式/位深/通道数、诊断信息和复现步骤。涉及原始素材时，优先提供经授权的最小复现样本；不要公开私密录音。
