@@ -2,9 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { audioRecord } from "./helpers.mjs";
 import {
+  REPAIR_REFERENCE_AUTO_LABEL,
+  REPAIR_REFERENCE_AUTO_VALUE,
   TAKE_EXCLUSION_REASONS,
   buildExportChoices,
   buildExportOptions,
+  buildRepairReferenceOptions,
   createRememberedDirectoryStore,
   defaultCheckedForChannel,
   describeDroppedTakes,
@@ -137,7 +140,7 @@ test("buildExportOptions returns the field names poly-combine-controller reads",
   const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
   const choices = buildExportChoices(groups);
   const options = buildExportOptions({ profileId: "archive", choices, checkedKeys: resolveCheckedKeys(choices, "archive"), groupCount: 1 });
-  assert.deepEqual(Object.keys(options).sort(), ["profile", "selectedSourceChannels"]);
+  assert.deepEqual(Object.keys(options).sort(), ["profile", "repair", "selectedSourceChannels"]);
   assert.equal(options.profile, "archive");
   assert.ok(options.selectedSourceChannels instanceof Set);
   // 归档方案保留源编码，控制器会按 profile 决定编码，不需要界面传
@@ -424,4 +427,163 @@ test("without IndexedDB the directory store degrades to per-export prompts inste
   const picked = await store.pick();
   assert.deepEqual(picked, { handle: null, cancelled: false, remembered: false });
   assert.match(store.describe().text, /每次导出都会询问保存位置|不支持选择文件夹/);
+});
+
+// ---------------------------------------------------------------------------
+// 对齐修复（时长 / 偏移 / 时钟漂移）
+//
+// 契约：options.repair = { enabled: boolean, referenceKey: string }，
+// referenceKey 是 sourceTrackKey（"文件名:声道下标"），空串 = 自动。
+// 界面不判断哪个 take 需要修，默认必须是不开。
+// ---------------------------------------------------------------------------
+
+test("repair is off by default, and the engine still gets an explicit enabled:false", async () => {
+  const records = await take("take22", { tracks: 2 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  // 不传 repairEnabled / repairKey：这就是界面上什么都不碰时的样子
+  const options = buildExportOptions({ profileId: "resolve", choices, checkedKeys: resolveCheckedKeys(choices, "resolve"), groupCount: 1 });
+  assert.equal(options.repair.enabled, false, "修复必须默认关闭，不能改任何现有默认行为");
+  assert.equal(options.repair.referenceKey, "");
+  assert.deepEqual(Object.keys(options.repair).sort(), ["enabled", "referenceKey"]);
+});
+
+test("checking repair turns it on and leaves the reference track on 自动", async () => {
+  const records = await take("take23", { tracks: 2 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  const options = buildExportOptions({
+    profileId: "resolve",
+    choices,
+    checkedKeys: resolveCheckedKeys(choices, "resolve"),
+    groupCount: 1,
+    repairEnabled: true,
+    repairKey: REPAIR_REFERENCE_AUTO_VALUE,
+  });
+  assert.equal(options.repair.enabled, true);
+  assert.equal(options.repair.referenceKey, "", "勾上但没选基准轨 = 自动档，不是空值缺失");
+});
+
+test("a chosen reference track reaches buildExportOptions as the raw sourceTrackKey", async () => {
+  const records = await take("take24", { tracks: 3 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  const target = choices.takes[0].channels[1];
+  const options = buildExportOptions({
+    profileId: "resolve",
+    choices,
+    checkedKeys: resolveCheckedKeys(choices, "resolve"),
+    groupCount: 1,
+    repairEnabled: true,
+    repairKey: target.key,
+  });
+  // 透传的必须是引擎认得的那个键，不能被界面改写成别的形状
+  assert.equal(options.repair.referenceKey, "take24_Tr2.wav:0");
+  assert.equal(options.repair.referenceKey, sourceTrackKey({ record: { relativePath: target.recordKey }, channelIndex: target.channelIndex }));
+  assert.equal(options.repair.enabled, true);
+});
+
+test("an empty reference key is legal, and a stale one is passed through instead of rejected", async () => {
+  const records = await take("take25", { tracks: 2 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  const checked = resolveCheckedKeys(choices, "resolve");
+  const options = buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairEnabled: true, repairKey: "" });
+  // 自动是合法选项：界面上"没有基准轨"不该被当成非法输入
+  assert.equal(options.repair.referenceKey, "");
+
+  // 引擎才决定这个 key 存不存在，界面不抢着报错
+  const stale = buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairEnabled: true, repairKey: "别的目录/没了.wav:3" });
+  assert.equal(stale.repair.referenceKey, "别的目录/没了.wav:3");
+  // 没勾修复时这个 key 无意义，但照样带过去，省掉一层条件分支
+  const off = buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairKey: "别的目录/没了.wav:3" });
+  assert.deepEqual(off.repair, { enabled: false, referenceKey: "别的目录/没了.wav:3" });
+});
+
+test("malformed repair input is coerced to the contract shape instead of throwing", async () => {
+  const records = await take("take26", { tracks: 2 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  const checked = resolveCheckedKeys(choices, "resolve");
+  const build = repairEnabled => buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairEnabled });
+
+  assert.equal(build(undefined).repair.enabled, false);
+  assert.equal(build(null).repair.enabled, false);
+  assert.equal(build(0).repair.enabled, false);
+  assert.equal(build(false).repair.enabled, false);
+  assert.equal(build(1).repair.enabled, true);
+  assert.equal(build("yes").repair.enabled, true);
+
+  for (const repairKey of [undefined, null, 123, {}, [], "   "]) {
+    const options = build(true);
+    const withKey = buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairEnabled: true, repairKey });
+    assert.equal(typeof withKey.repair.referenceKey, "string", `${String(repairKey)} 应该被收敛成字符串`);
+    assert.equal(typeof options.repair.referenceKey, "string");
+  }
+  // 前后空白是 select 之外（比如手改 URL 参数）才可能进来的东西，trim 掉再交出去
+  assert.equal(
+    buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairEnabled: true, repairKey: "  take26_Tr1.wav:0  " }).repair.referenceKey,
+    "take26_Tr1.wav:0",
+  );
+});
+
+test("the reference track picker reads like a file list, not a raw key list", async () => {
+  const records = await take("take27", { tracks: 3 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  const model = buildRepairReferenceOptions({ choices, profileId: "resolve", checkedKeys: resolveCheckedKeys(choices, "resolve") });
+
+  // 第一项恒为自动档，value 是空串
+  assert.equal(model.options[0].value, "");
+  assert.equal(model.options[0].label, REPAIR_REFERENCE_AUTO_LABEL);
+  assert.equal(REPAIR_REFERENCE_AUTO_VALUE, "");
+  assert.equal(model.selected, "");
+
+  assert.deepEqual(model.options.slice(1).map(option => option.value), ["take27_Tr1.wav:0", "take27_Tr2.wav:0", "take27_Tr3.wav:0"]);
+  for (const option of model.options.slice(1)) {
+    assert.match(option.value, /^[^\s:]+:\d+$/, "value 必须是引擎认得的 sourceTrackKey");
+    assert.ok(!option.label.includes(option.value), "文案不能把 name.wav:0 甩给用户");
+    assert.ok(option.label.includes("·"), "用「文件名 · 通道」这种能读懂的写法");
+  }
+  assert.equal(model.options[1].label, "take27_Tr1.wav · Tr1");
+  assert.match(model.hintText, /尾部裁切/, "提示必须写明尾部裁切不会自动执行");
+});
+
+test("the reference track picker only offers tracks that survive exclusions, and forgets a stale pick", async () => {
+  const records = await take("take28", { tracks: 3 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const ltcResults = new Map([["take28_Tr2.wav", { ok: true, sourceRecord: records[1], channelIndex: 0 }]]);
+  const choices = buildExportChoices(groups, { ltcResults });
+
+  // 已经被方案排除的 LTC 轨不会进输出，当基准没有意义
+  const model = buildRepairReferenceOptions({ choices, profileId: "resolve", checkedKeys: resolveCheckedKeys(choices, "resolve") });
+  assert.deepEqual(model.options.map(option => option.value), ["", "take28_Tr1.wav:0", "take28_Tr3.wav:0"]);
+
+  // 换了方案、取消勾选导致候选里没有它了 → 退回自动，而不是继续传一个死键
+  const stale = buildRepairReferenceOptions({ choices, profileId: "resolve", checkedKeys: resolveCheckedKeys(choices, "resolve"), value: "take28_Tr2.wav:0" });
+  assert.equal(stale.selected, "");
+  const kept = buildRepairReferenceOptions({ choices, profileId: "resolve", checkedKeys: resolveCheckedKeys(choices, "resolve"), value: "take28_Tr3.wav:0" });
+  assert.equal(kept.selected, "take28_Tr3.wav:0");
+
+  // 一条都没勾时只剩自动档，并说清为什么没有候选
+  const none = buildRepairReferenceOptions({ choices, profileId: "resolve", checkedKeys: new Set() });
+  assert.deepEqual(none.options.map(option => option.value), [""]);
+  assert.match(none.hintText, /没有可选的基准轨/);
+});
+
+test("a multi-take export labels the repair reference with its take so同名文件分得清", () => {
+  // 直接喂 choices：跨目录同名文件的 relativePath 会撞车，但 sourceTrackKey 一样，
+  // 下拉里必须只出现一次，同时因为有两个 take 就带上 take 标签。
+  const channel = takeKey => ({ key: "clip_Tr1.wav:0", takeKey, takeLabel: takeKey.split("/")[0], recordName: "clip_Tr1.wav", channelName: "Tr1" });
+  const choices = {
+    takes: [
+      { takeKey: "dayA/dayA", takeLabel: "dayA", channels: [channel("dayA/dayA")] },
+      { takeKey: "dayB/dayB", takeLabel: "dayB", channels: [channel("dayB/dayB")] },
+    ],
+    allKeys: ["clip_Tr1.wav:0"],
+  };
+  const model = buildRepairReferenceOptions({ choices, profileId: "resolve", checkedKeys: new Set(["clip_Tr1.wav:0"]) });
+  assert.equal(model.multiTake, true);
+  assert.deepEqual(model.options.map(option => option.value), ["", "clip_Tr1.wav:0"]);
+  assert.equal(model.options[1].label, "dayA · clip_Tr1.wav · Tr1");
 });

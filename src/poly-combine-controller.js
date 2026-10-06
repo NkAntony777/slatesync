@@ -1,9 +1,11 @@
 import {
+  combineTrackPlan,
   safeWaveBaseName,
   validateCombineGroup,
   writeCombinedPolyToWritable,
 } from "./wave-combine.js";
-import { POLY_EXPORT_PROFILES, polyExportProfile } from "./poly-export-profiles.js";
+import { POLY_EXPORT_PROFILES, applyPolyExportPolicy, polyExportProfile } from "./poly-export-profiles.js";
+import { planRepairsForTracks } from "./repair-planner.js";
 import { syncGuideText, syncPackageManifest } from "./sync-workflow.js";
 import { buildAcceptanceChecklist } from "./acceptance-checklist.js";
 import { takeHealthScopeForCombine } from "./confirm-flows.js";
@@ -38,6 +40,67 @@ export function partitionCollidingNames(plannedNames, existingNames) {
     seen.add(lower);
   }
   return { collisions, fresh };
+}
+
+const BATCH_STAGE_LABELS = { timecode: "时码准备", validate: "预校验", write: "写入" };
+
+/**
+ * 一次批量合并的成败汇总。纯函数：不碰 DOM、不读文件。
+ *
+ * 批量作业里"坏一个就整批陪葬"是直接的产出损失——20 个 take 坏 1 个，结果可能是 0 个文件。
+ * 所以每个 take 单独记账（见 combinePolyFiles 里的 outcomes），最后一次性告诉用户
+ * 成功几个、失败几个、失败的是谁、为什么失败。
+ *
+ * failures 里每一项都带齐了阶段 3b 渲染一份失败清单所需的字段（takeKey / takeLabel /
+ * name / stage / stageLabel / message），渲染层不该再回头去猜"这是哪个 take"。
+ * statusText / toastText / countText 是三处 UI 共用的文案，避免各处各写一套措辞。
+ */
+export function summarizeBatchOutcomes(outcomes = []) {
+  const entries = (Array.isArray(outcomes) ? outcomes : []).filter(Boolean);
+  const failures = entries.filter(entry => !entry.ok).map(entry => {
+    const raw = entry.message ?? entry.error?.message ?? entry.error;
+    return {
+      takeKey: String(entry.takeKey ?? ""),
+      takeLabel: String(entry.takeLabel || entry.takeKey || ""),
+      name: String(entry.name || ""),
+      stage: String(entry.stage || "write"),
+      stageLabel: BATCH_STAGE_LABELS[entry.stage] || BATCH_STAGE_LABELS.write,
+      message: raw === undefined || raw === null || raw === "" ? "未知原因" : String(raw),
+    };
+  });
+  const succeeded = entries.length - failures.length;
+  const countText = `成功 ${succeeded} 个 / 失败 ${failures.length} 个`;
+  // 状态行/toast 只放得下一条，完整清单交给日志面板，所以这里只点名第一个失败。
+  const failureLines = failures.map(item => `${item.takeLabel}（${item.name || item.takeKey} · ${item.stageLabel}）：${item.message}`);
+  const firstFailure = failureLines.length ? failureLines[0] : "";
+  const moreFailures = failures.length > 1 ? `（还有 ${failures.length - 1} 个，详见日志）` : "";
+  return {
+    total: entries.length,
+    succeeded,
+    failed: failures.length,
+    hasFailures: failures.length > 0,
+    failures,
+    countText,
+    failureLines,
+    // 阶段 3b 的失败清单可以直接铺 failureLines，或整块贴进日志面板的 failureText。
+    failureText: failureLines.join("\n"),
+    // 全成功时与改动前逐字相同：顺利路径的界面不该因为这次修复而换措辞。
+    statusText: failures.length ? `Poly 合并完成：${countText} — ${firstFailure}${moreFailures}` : `Poly 合并完成：${succeeded} 个文件`,
+    toastText: failures.length ? `⚠️ Poly 合并完成 — ${countText} — ${firstFailure}${moreFailures}` : `✅ Poly 合并完成 — ${succeeded} 个文件`,
+  };
+}
+
+/** 单个 take 的失败记录。字段与 summarizeBatchOutcomes 产出的 failures 一一对应。 */
+function takeFailure(takeKey, stage, error) {
+  const raw = error?.message ?? error;
+  return {
+    ok: false,
+    takeKey,
+    takeLabel: shortGroupLabel(takeKey),
+    name: polyOutputNameFor(takeKey),
+    stage,
+    message: raw === undefined || raw === null || raw === "" ? "未知原因" : String(raw),
+  };
 }
 
 /** 查目标目录里哪些计划文件名已存在。拿不准的错误直接抛给调用方决定。 */
@@ -162,47 +225,67 @@ export function createPolyCombineController({
     return { ltcMap: ltcResults, hasLtcTimecode };
   }
 
-  function recordsWithPreviewTimecode(groups, previewMap) {
-    return groups.map(([key, groupRecords]) => {
-      const nextRecords = groupRecords.map(record => {
-        const preview = previewMap.get(recordKey(record));
-        if (!preview || preview.newTimeReference === undefined) {
-          throw new Error(`${groupLabel(record)}: 这个分轨没有当前时码预览，不能用预览时码合成 Poly`);
-        }
-        return {
-          ...record,
-          oldTimeReference: preview.newTimeReference,
-          _combineFpsValue: preview.fpsValue || preview.fps?.value || getFpsValue?.(),
-          ixmlInfo: preview.ixmlInfo || record.ixmlInfo,
-        };
-      });
-      const first = nextRecords[0]?.oldTimeReference;
-      if (!nextRecords.every(record => record.oldTimeReference === first)) {
-        throw new Error(`${groupLabel(nextRecords[0])}: 同一 take 的预览后起始时码不一致，不能合成 Poly`);
+  // 逐 take 套用时码，失败的 take 收集起来而不是抛断整批。
+  // 旧写法是 map 一次跑完，任何一个 take 缺时码就会让另外 19 个能写的 take 一起陪葬——
+  // 和写入循环/预校验的"逐个成败"语义对不上，这里统一成同一套。
+  function collectTimecodeGroups(groups, apply) {
+    const kept = [];
+    const failures = [];
+    for (const [key, groupRecords] of groups) {
+      try {
+        kept.push([key, apply(groupRecords)]);
+      } catch (error) {
+        failures.push(takeFailure(key, "timecode", error));
       }
-      return [key, nextRecords];
+    }
+    return { groups: kept, failures };
+  }
+
+  function previewTimecodeRecords(groupRecords, previewMap) {
+    const nextRecords = groupRecords.map(record => {
+      const preview = previewMap.get(recordKey(record));
+      if (!preview || preview.newTimeReference === undefined) {
+        throw new Error(`${groupLabel(record)}: 这个分轨没有当前时码预览，不能用预览时码合成 Poly`);
+      }
+      return {
+        ...record,
+        oldTimeReference: preview.newTimeReference,
+        _combineFpsValue: preview.fpsValue || preview.fps?.value || getFpsValue?.(),
+        ixmlInfo: preview.ixmlInfo || record.ixmlInfo,
+      };
     });
+    const first = nextRecords[0]?.oldTimeReference;
+    if (!nextRecords.every(record => record.oldTimeReference === first)) {
+      throw new Error(`${groupLabel(nextRecords[0])}: 同一 take 的预览后起始时码不一致，不能合成 Poly`);
+    }
+    return nextRecords;
+  }
+
+  function ltcTimecodeRecords(groupRecords, ltcMap) {
+    const nextRecords = groupRecords.map(record => {
+      const ltc = ltcMap.get(recordKey(record));
+      if (!ltc?.ok || ltc.newTimeReference === undefined || ltc.newTimeReference === null) {
+        throw new Error(`${groupLabel(record)}: 这个分轨没有可用的 LTC 时码，不能用 LTC 时码合成 Poly`);
+      }
+      return {
+        ...record,
+        oldTimeReference: ltc.newTimeReference,
+        _combineFpsValue: ltc.fpsValue || ltc.fps?.value || getFpsValue?.(),
+      };
+    });
+    const first = nextRecords[0]?.oldTimeReference;
+    if (!nextRecords.every(record => record.oldTimeReference === first)) {
+      throw new Error(`${groupLabel(nextRecords[0])}: 同一 take 的 LTC 起始时码不一致，不能合成 Poly`);
+    }
+    return nextRecords;
+  }
+
+  function recordsWithPreviewTimecode(groups, previewMap) {
+    return collectTimecodeGroups(groups, groupRecords => previewTimecodeRecords(groupRecords, previewMap));
   }
 
   function recordsWithLtcTimecode(groups, ltcMap) {
-    return groups.map(([key, groupRecords]) => {
-      const nextRecords = groupRecords.map(record => {
-        const ltc = ltcMap.get(recordKey(record));
-        if (!ltc?.ok || ltc.newTimeReference === undefined || ltc.newTimeReference === null) {
-          throw new Error(`${groupLabel(record)}: 这个分轨没有可用的 LTC 时码，不能用 LTC 时码合成 Poly`);
-        }
-        return {
-          ...record,
-          oldTimeReference: ltc.newTimeReference,
-          _combineFpsValue: ltc.fpsValue || ltc.fps?.value || getFpsValue?.(),
-        };
-      });
-      const first = nextRecords[0]?.oldTimeReference;
-      if (!nextRecords.every(record => record.oldTimeReference === first)) {
-        throw new Error(`${groupLabel(nextRecords[0])}: 同一 take 的 LTC 起始时码不一致，不能合成 Poly`);
-      }
-      return [key, nextRecords];
-    });
+    return collectTimecodeGroups(groups, groupRecords => ltcTimecodeRecords(groupRecords, ltcMap));
   }
 
   function mutedLtcChannelsForGroups(groups, ltcMap) {
@@ -333,24 +416,84 @@ export function createPolyCombineController({
         : groups.length > 1 ? "本次会让你选一个输出文件夹" : "逐个选择保存位置",
     });
     if (!choice) return;
-    const groupsToWrite = choice === "preview"
+    const prepared = choice === "preview"
       ? recordsWithPreviewTimecode(groups, previewMap)
       : choice === "ltc"
         ? recordsWithLtcTimecode(groups, ltcMap)
-        : groups;
+        : { groups, failures: [] };
+    // groupsToWrite 只含时码准备成功的 take；被刷掉的那些在 outcomes 里记成 "时码准备" 失败，
+    // 用户仍然看得到"这一批里到底是哪几个没写出来"，而不是被一个异常整体带偏。
+    const groupsToWrite = prepared.groups;
+    const timecodeFailures = prepared.failures;
     const mutedSourceChannels = muteLtc ? mutedLtcChannelsForGroups(groups, ltcMap) : new Set();
     const policies = new Map(groupsToWrite.map(([key, records]) => [key, optionsForGroup(records, {
       ...exportOptions, profile: profile.id,
       mutedSourceChannels: profile.id === "archive" ? mutedSourceChannels : new Set(),
       ltcSourceChannels: exportOptions.ltcSourceChannels || (muteLtc ? mutedSourceChannels : new Set()),
     })]));
-    for (const [key, records] of groupsToWrite) validateCombineGroup(records, { ...policies.get(key), groupLabel });
+
+    // 对齐修复默认关闭（用户没勾就是没有 repair 字段）。开启后逐 take 现算：
+    // 读头尾两段窗口 → 测偏移与漂移 → 把计划挂进该 take 的 policy。
+    // 必须在预校验之前做完——时长不一致正是 validateCombineGroup 会抛的那一项，
+    // 修复计划要先在案，才谈得上放行。任何一个 take 测不出来就跳过它自己，
+    // 既不打断整批，也不拿低置信结果去改音频。
+    if (exportOptions.repair?.enabled) {
+      for (const [key, records] of groupsToWrite) {
+        const policy = policies.get(key);
+        let tracks = null;
+        try { tracks = applyPolyExportPolicy(combineTrackPlan(records), policy).tracks; }
+        catch (error) { log(`Repair WARN: ${shortGroupLabel(key)}: ${error.message}；该 take 不做对齐修复`); continue; }
+        try {
+          const planned = await planRepairsForTracks(tracks, exportOptions.repair.referenceKey || "", {
+            sampleRate: Number(records[0]?.sampleRate) || 48000,
+          });
+          if (!planned.plans.size) {
+            log(`Repair: ${shortGroupLabel(key)} 无需对齐修正（或测不出可靠偏移），按原样合并`);
+            continue;
+          }
+          if (!planned.referenceMatched) {
+            log(`Repair: ${shortGroupLabel(key)} 里没有你指定的基准轨，已自动改用 ${planned.referenceKey}`);
+          }
+          policies.set(key, { ...policy, repair: {
+            enabled: true,
+            referenceKey: planned.referenceKey,
+            outputSamples: planned.outputSamples,
+            plans: planned.plans,
+          } });
+          const summaryText = [...planned.plans.values()].map(plan =>
+            `${plan.padSamples ? `补 ${plan.padSamples}` : ""}${plan.skipSamples ? `丢 ${plan.skipSamples}` : ""}${plan.needsResample ? ` 重采样 ${plan.driftRatio.toFixed(6)}` : ""}${plan.polarity === -1 ? " 极性反接" : ""}`
+          ).join("；");
+          log(`Repair: ${shortGroupLabel(key)} 以 ${planned.referenceKey} 为基准修正 ${planned.plans.size} 条分轨（${summaryText}）`);
+        } catch (error) {
+          log(`Repair WARN: ${shortGroupLabel(key)}: ${error?.message || error}；该 take 不做对齐修复`);
+        }
+      }
+    }
+
+    // 预校验改成"逐个收集"而不是"第一个错就整批中断"：批量导出里 1 个坏 take
+    // 不该带走另外 19 个已经能写出的 take。这里只记账、不抛断——
+    // 失败的 take 到写入循环里会被跳过并进失败清单，其余 take 照常落盘。
+    const precheckFailures = new Map();
+    for (const [key, records] of groupsToWrite) {
+      try { validateCombineGroup(records, { ...policies.get(key), groupLabel }); }
+      catch (error) {
+        precheckFailures.set(key, error?.message ? String(error.message) : String(error));
+        log(`Combine Poly PRECHECK WARN: ${shortGroupLabel(key)}: ${error?.message || error}；这个 take 会被跳过，其余 take 继续`);
+      }
+    }
     // Reference audio is deliberately explicit: the first channel might be LTC, room tone, or silent.
     if (exportOptions.referenceSourceChannel) {
       if (groupsToWrite.length !== 1) throw new Error("参考通道目前需逐 take 显式选择；请一次导出一个 take");
-      const plan = validateCombineGroup(groupsToWrite[0][1], policies.get(groupsToWrite[0][0]));
-      if (!plan.tracks.some(track => `${recordKey(track.record)}:${track.channelIndex}` === exportOptions.referenceSourceChannel)) throw new Error("SyncRef 必须选择主 Poly 中保留的有效节目通道，不能是被排除的 LTC");
+      // 预校验已经判失败的 take 不在这里再校验一次：同一个错会重新抛出来，
+      // 又把"这个 take 失败"变回"整批 0 产出"。SyncRef 的通道检查留给用户重试这一批时再做。
+      if (!precheckFailures.has(groupsToWrite[0][0])) {
+        const plan = validateCombineGroup(groupsToWrite[0][1], policies.get(groupsToWrite[0][0]));
+        if (!plan.tracks.some(track => `${recordKey(track.record)}:${track.channelIndex}` === exportOptions.referenceSourceChannel)) throw new Error("SyncRef 必须选择主 Poly 中保留的有效节目通道，不能是被排除的 LTC");
+      }
     }
+    // 同名 Poly 仍然是整批阻断（避免静默覆盖），而且刻意覆盖"计划写出的全部名字"，
+    // 不因为某个 take 预校验失败就缩小范围：冲突是写盘前的计划问题，
+    // 失败的 take 用户随时会重试，那时它照样会撞名。
     const outputNames = groupsToWrite.map(([key]) => polyOutputNameFor(key).toLowerCase());
     if (new Set(outputNames).size !== outputNames.length) throw new Error("不同目录的 take 将产生同名 Poly；为避免覆盖，请分批导出或先区分 take 名称");
     const { directory: outputDirectory, cancelled } = await resolveOutputDirectory(groupsToWrite.length);
@@ -369,44 +512,80 @@ export function createPolyCombineController({
 
     const results = [];
     const checklists = [];
+    // 每个 take 一条成败记录（成功与失败都在这里），末尾一次性汇总给用户。
+    const outcomes = [];
+    const succeededKeys = new Set();
+    // 时码阶段就被刷掉的 take 不进写入循环，直接进失败清单，保证"成功 + 失败 = 本批 take 总数"。
+    outcomes.push(...timecodeFailures);
+    if (timecodeFailures.length) {
+      log(`Combine Poly TIMECODE WARN: ${timecodeFailures.length} 个 take 因时码不可用被跳过，其余 take 继续合并`);
+    }
     try {
       for (let i = 0; i < groupsToWrite.length; i++) {
         const [key, groupRecords] = groupsToWrite[i];
         updateWriteProgress("正在合并 Poly…", shortGroupLabel(key), i, groupsToWrite.length);
-        const result = outputDirectory
-          ? await writeCombinedPolyToDirectory(outputDirectory, key, groupRecords, policies.get(key), i, groupsToWrite.length)
-          : await writeCombinedPolyFile(key, groupRecords, policies.get(key), i, groupsToWrite.length);
-        if (exportOptions.referenceSourceChannel) {
+        const precheckFailure = precheckFailures.get(key);
+        // 失败的 take 同样占住自己的进度槽位：done/total 照旧是"处理完几个"，
+        // 进度条不会因为一个坏 take 而卡在原地。
+        let progressFile = `${shortGroupLabel(key)} 失败`;
+        if (precheckFailure) {
+          // 预校验失败的 take 刻意不落盘：走输出目录时 getFileHandle({ create: true })
+          // 会先建出一个空文件，再在 writeCombinedPolyToWritable 里失败，白留 0 字节文件。
+          outcomes.push(takeFailure(key, "validate", precheckFailure));
+        } else {
           try {
-            const refName = polyReferenceOutputNameFor(result.name);
-            // 有目录时 SyncRef 直接落在同一目录，省掉一次保存框，也和主 Poly 待在一起。
-            const handle = outputDirectory
-              ? await outputDirectory.getFileHandle(refName, { create: true })
-              : await window.showSaveFilePicker({ suggestedName: refName, types: [{ description: "Mono sync reference", accept: { "audio/wav": [".wav"] } }] });
-            await writeCombinedPolyToWritable(key, groupRecords, await handle.createWritable(), outputDirectory ? refName : handle.name, {
-              ...policies.get(key), selectedSourceChannels: new Set([exportOptions.referenceSourceChannel]),
-              onProgress: updateWriteProgress, fallbackFpsValue: getFpsValue?.(),
+            const result = outputDirectory
+              ? await writeCombinedPolyToDirectory(outputDirectory, key, groupRecords, policies.get(key), i, groupsToWrite.length)
+              : await writeCombinedPolyFile(key, groupRecords, policies.get(key), i, groupsToWrite.length);
+            if (exportOptions.referenceSourceChannel) {
+              try {
+                const refName = polyReferenceOutputNameFor(result.name);
+                // 有目录时 SyncRef 直接落在同一目录，省掉一次保存框，也和主 Poly 待在一起。
+                const handle = outputDirectory
+                  ? await outputDirectory.getFileHandle(refName, { create: true })
+                  : await window.showSaveFilePicker({ suggestedName: refName, types: [{ description: "Mono sync reference", accept: { "audio/wav": [".wav"] } }] });
+                await writeCombinedPolyToWritable(key, groupRecords, await handle.createWritable(), outputDirectory ? refName : handle.name, {
+                  ...policies.get(key), selectedSourceChannels: new Set([exportOptions.referenceSourceChannel]),
+                  onProgress: updateWriteProgress, fallbackFpsValue: getFpsValue?.(),
+                });
+                result.referenceName = outputDirectory ? refName : handle.name;
+              } catch (error) { log(`SyncRef WARN: ${error.message}; 主 Poly 已保存`); }
+            }
+            // 清单必须在写 sidecar 之前建好：它要进 _合板说明.txt，不能等面板。
+            const checklist = checklistFor(result, {
+              profileId: profile.id,
+              referenceSourceChannel: exportOptions.referenceSourceChannel,
+              takeKey: key,
             });
-            result.referenceName = outputDirectory ? refName : handle.name;
-          } catch (error) { log(`SyncRef WARN: ${error.message}; 主 Poly 已保存`); }
+            try { if (outputDirectory) await saveSidecars(outputDirectory, result, checklist); else downloadWorkflow(result, checklist); }
+            catch (error) { log(`Sync guide WARN: ${error.message}; Poly 已保存，可从 docs/声音合板指南.md 查看说明`); }
+            if (result.clippedSamples || result.invalidSamples) log(`Poly WARN: ${result.name}: PCM24 转换削波 ${result.clippedSamples} samples，非有限值 ${result.invalidSamples}；请使用原始 float 或降低增益`);
+            results.push(result);
+            if (checklist) checklists.push({ result, takeKey: key, checklist });
+            outcomes.push({ ok: true, takeKey: key, takeLabel: shortGroupLabel(key), name: result.name });
+            succeededKeys.add(key);
+            progressFile = result.name;
+          } catch (error) {
+            // 用户主动关掉保存框是"退出这次导出"，不是这个 take 失败：保持原来的抛出行为，
+            // 让 guarded 去显示这句话，而不是把它算成一次可重试的失败。
+            if (error?.name === "AbortError") throw error;
+            outcomes.push(takeFailure(key, "write", error));
+            log(`Combine Poly WARN: ${shortGroupLabel(key)}: ${error?.message || error}；已跳过这个 take，其余 take 继续`);
+          }
         }
-        // 清单必须在写 sidecar 之前建好：它要进 _合板说明.txt，不能等面板。
-        const checklist = checklistFor(result, {
-          profileId: profile.id,
-          referenceSourceChannel: exportOptions.referenceSourceChannel,
-          takeKey: key,
-        });
-        try { if (outputDirectory) await saveSidecars(outputDirectory, result, checklist); else downloadWorkflow(result, checklist); }
-        catch (error) { log(`Sync guide WARN: ${error.message}; Poly 已保存，可从 docs/声音合板指南.md 查看说明`); }
-        if (result.clippedSamples || result.invalidSamples) log(`Poly WARN: ${result.name}: PCM24 转换削波 ${result.clippedSamples} samples，非有限值 ${result.invalidSamples}；请使用原始 float 或降低增益`);
-        results.push(result);
-        if (checklist) checklists.push({ result, takeKey: key, checklist });
-        updateWriteProgress("正在合并 Poly…", result.name, i + 1, groupsToWrite.length);
+        updateWriteProgress("正在合并 Poly…", progressFile, i + 1, groupsToWrite.length);
       }
+      const summary = summarizeBatchOutcomes(outcomes);
       const stateLabel = choice === "preview" || choice === "ltc" ? "已更改并合并" : "已合并";
-      setState(stateLabel);
+      // 有失败时状态词要说实话：只剩"已合并"等于把"少写了 take"报成正常完成。
+      if (summary.hasFailures) setState(results.length ? "部分已合并" : "合并失败", "warn");
+      else setState(stateLabel);
+      // 只有真正写出去的 take 才标记为已合并：失败的 take 若也被打标，
+      // 界面会以为它已经有 Poly，用户想重试时反而找不到入口。
       const allRecordKeys = new Set(
-        groupsToWrite.flatMap(([, groupRecords]) => groupRecords.map(record => recordKey(record)))
+        groupsToWrite
+          .filter(([key]) => succeededKeys.has(key))
+          .flatMap(([, groupRecords]) => groupRecords.map(record => recordKey(record)))
       );
       setCombinedPolyKeys(allRecordKeys);
       renderRows();
@@ -416,7 +595,14 @@ export function createPolyCombineController({
           ? "; used LTC timecode"
           : "";
       const muteNote = mutedSourceChannels.size ? profile.ltcPolicy === "exclude" ? "; excluded confirmed LTC channels" : profile.id === "archive" ? "; muted LTC track" : "; retained LTC" : "";
-      log(`Combine Poly OK: ${results.map(result => `${result.name} (${result.channels}ch)`).join(", ")}${timecodeNote}${muteNote}`);
+      // 全批失败时 results 是空的，这条 OK 日志会变成一句空话——没写出文件就不说 OK。
+      if (results.length) log(`Combine Poly OK: ${results.map(result => `${result.name} (${result.channels}ch)`).join(", ")}${timecodeNote}${muteNote}`);
+      // 逐个 take 的失败原因在各自的位置已经打过 WARN，这里只交代总数，
+      // 免得用户在日志里翻两遍同一件事。
+      log(`Combine Poly DONE: ${summary.countText}`);
+      // 状态行/toast 只装得下第一个失败，完整清单（含是哪个 take、哪个阶段、什么原因）
+      // 必须落进日志面板，否则批量失败时用户无从知道少写了哪几个。
+      if (summary.hasFailures) log(`Combine Poly FAILED:\n${summary.failureText}`);
 
       // 验收面板。批量导出时每个 take 各有一份清单，面板逐份显示——
       // 只给最后一份会让"已经合了但没验收"的 take 消失。
@@ -430,8 +616,8 @@ export function createPolyCombineController({
         ? `；还有 ${needsHuman} 项需要你人工确认`
         : failCount ? `；有 ${failCount} 项发现问题` : "";
 
-      els.statusLine.textContent = `Poly 合并完成：${results.length} 个文件${acceptanceNote}`;
-      els.toast.textContent = `✅ Poly 合并完成 — ${results.length} 个文件${acceptanceNote}`;
+      els.statusLine.textContent = `${summary.statusText}${acceptanceNote}`;
+      els.toast.textContent = `${summary.toastText}${acceptanceNote}`;
       els.toast.classList.add("show");
       setTimeout(() => els.toast.classList.remove("show"), 4500);
       return results;

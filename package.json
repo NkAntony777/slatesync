@@ -6,8 +6,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs",
-    "test:all": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs",
+    "test": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/poly-combine-batch.test.mjs test/take-grouping.test.mjs test/take-repair.test.mjs test/take-repair-apply.test.mjs test/repair-planner.test.mjs test/merge-rate.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs",
+    "test:all": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/poly-combine-batch.test.mjs test/take-grouping.test.mjs test/take-repair.test.mjs test/take-repair-apply.test.mjs test/repair-planner.test.mjs test/merge-rate.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs",
     "bench": "node test/bench-ltc.mjs",
     "build:single": "node scripts/build-single-file.mjs",
     "verify:single": "node test/verify-single-file.mjs",

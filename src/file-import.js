@@ -1,3 +1,8 @@
+// 合板率总览是纯函数模块、没有状态，所以直接静态引入。
+// 本文件其余依赖仍走注入（接线在 index.html，由 UI 层统一维护），只有这一个例外：
+// 状态栏文案不值得为它在接线里再加一个参数。
+import { formatMergeRateSummary, summarizeMergeRate } from "./merge-rate.js";
+
 async function readFileAsText(handle) {
   const file = await handle.getFile();
   const buf = new Uint8Array(await file.arrayBuffer());
@@ -30,7 +35,6 @@ export function createFileImportController({
   pushRecord,
   clearAfterImportState,
   refreshTakeGroups,
-  takeGroupCount,
   combineEligibleGroups,
   detectedMetadataFps,
   fpsDiffersFromUi,
@@ -40,6 +44,9 @@ export function createFileImportController({
   confirmMetadataFpsMismatch,
   // 可选：per-take 覆盖 store（src/take-fps.js）。不注入时退回旧的全局 setFpsValue 行为。
   takeFps = null,
+  // 可选：取当前 take 分组结果。不注入时 summarizeMergeRate 自己按 grouping.js 的规则算，
+  // 与 refreshTakeGroups 同源，结果一致（分组键含 parentPath，take 不会跨导入批次）。
+  getTakeGroupKeys = null,
   renderRows,
   setState,
   log,
@@ -126,7 +133,10 @@ export function createFileImportController({
     if (metaRecords.length) parts.push(`${metaRecords.length} 个视频元数据`);
     if (videoRecords.length) parts.push(`${videoRecords.length} 个视频音轨`);
     if (wavRecords.length) {
-      const takeText = takeGroupCount() ? `，识别到 ${takeGroupCount()} 个分轨 take` : "";
+      // 合板率总览：状态栏只放聚合计数（能合几个 + 被卡的原因分布）。
+      // 具体是哪几个 take、卡在哪一条分轨、该怎么修，体检面板已经在逐条列了，这里不复制第二份。
+      // getTakeGroupKeys 未接线时 summarizeMergeRate 会按 grouping.js 的规则自算（与 refreshTakeGroups 同源）。
+      const takeText = formatMergeRateSummary(summarizeMergeRate(newRecords, getTakeGroupKeys?.()));
       parts.push(`${wavRecords.length} 个 WAV${takeText}`);
     }
     els.statusLine.textContent = `已载入 ${parts.join(" + ")}；可偏移预览或从音轨提取 LTC`;

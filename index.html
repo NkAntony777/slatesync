@@ -235,6 +235,21 @@
               <p id="exportChannelSummary" class="rail-hint"></p>
             </div>
 
+            <div class="export-reference">
+              <label class="check-row" title="按基准轨测量采样级时延与时钟漂移后重写每条分轨；会补静音、丢弃 pre-roll、线性重采样、极性取反，尾部裁切不会自动执行">
+                <input id="exportRepairEnabledInput" type="checkbox">
+                <span>对齐修复（时长/偏移/时钟漂移）</span>
+              </label>
+              <p class="rail-hint">
+                开启后按所选基准轨测量每条分轨的时延与时钟漂移再写入：<strong>补静音、丢弃 pre-roll、线性重采样、极性取反</strong>都是逐样本操作，<strong>尾部裁切不会自动执行</strong>。修复过程与结果会写进输出的 <code>_合板说明.txt</code>。工具不判断哪个 take 需要修——没勾就是原样合并。
+              </p>
+              <label class="field">
+                修复基准轨
+                <select id="exportRepairReferenceInput" aria-label="修复基准轨"></select>
+              </label>
+              <p id="exportRepairReferenceHint" class="rail-hint"></p>
+            </div>
+
             <div class="export-directory">
               <div class="export-directory-head">
                 <span>输出目录</span>
@@ -543,6 +558,7 @@
       buildExportChoices,
       buildExportOptions,
       buildFpsOverrideViewModel,
+      buildRepairReferenceOptions,
       buildTakeHealthViewModel,
       commonVideoFpsValue,
       confirmOverwriteOutputs,
@@ -685,6 +701,9 @@
       exportChannelsNoneBtn: document.getElementById("exportChannelsNoneBtn"),
       exportChannelList: document.getElementById("exportChannelList"),
       exportChannelSummary: document.getElementById("exportChannelSummary"),
+      exportRepairEnabledInput: document.getElementById("exportRepairEnabledInput"),
+      exportRepairReferenceInput: document.getElementById("exportRepairReferenceInput"),
+      exportRepairReferenceHint: document.getElementById("exportRepairReferenceHint"),
       exportDirectoryBtn: document.getElementById("exportDirectoryBtn"),
       exportDirectoryLabel: document.getElementById("exportDirectoryLabel"),
       exportRememberDirectoryInput: document.getElementById("exportRememberDirectoryInput"),
@@ -930,6 +949,8 @@
     // -------------------------------------------------------------------------
     const exportExplicitChecked = new Map();
     let exportReferenceKey = "";
+    // 修复基准轨的选择：候选变化后由 buildRepairReferenceOptions 判它还能不能用。
+    let exportRepairReferenceKey = "";
     let exportChoices = { takes: [], allKeys: [], confirmedLtcKeys: new Set() };
     let exportGroups = [];
     const outputDirectory = createRememberedDirectoryStore();
@@ -1005,12 +1026,33 @@
           : "当前没有可用的参考声道：先勾选至少一条节目通道。";
     }
 
+    function renderExportRepair() {
+      const enabled = Boolean(els.exportRepairEnabledInput.checked);
+      // 候选取"主 Poly 里保留的节目通道"，和 SyncRef 用同一套判据；
+      // 但"能不能修"由引擎判断，这里不显示任何 take 级的结论。
+      const model = buildRepairReferenceOptions({
+        choices: exportChoices,
+        profileId: exportProfileId(),
+        checkedKeys: checkedKeysForPanel(),
+        value: exportRepairReferenceKey,
+      });
+      exportRepairReferenceKey = model.selected;
+      els.exportRepairReferenceInput.innerHTML = model.options
+        .map(option => `<option value="${escapeHtml(option.value)}"${option.value === model.selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+        .join("");
+      // 没勾修复时下拉不可用：选基准轨在关闭状态下没有意义，
+      // 留一个能点但无效的控件只会让人以为它生效了。
+      els.exportRepairReferenceInput.disabled = !enabled;
+      els.exportRepairReferenceHint.textContent = enabled ? model.hintText : "勾选上面的「对齐修复」后才能指定基准轨；不勾就是原样合并。";
+    }
+
     function refreshExportOptions(groups = combineEligibleGroups()) {
       exportGroups = groups;
       exportChoices = buildExportChoices(groups, { ltcResults });
       renderExportProfileHint();
       renderExportChannels();
       renderExportReference();
+      renderExportRepair();
       // 体检结论依赖"哪些通道会被剔除"，所以方案/通道一变就得跟着重算。
       // 这同时覆盖了 LTC 提取完成与时码预览变化两条路径——它们都会走到这里。
       renderTakeHealthPanel();
@@ -1026,6 +1068,9 @@
         checkedKeys: checked,
         referenceSourceChannel: els.exportReferenceInput.value || "",
         groupCount: groups.length,
+        repairEnabled: Boolean(els.exportRepairEnabledInput.checked),
+        // 空串是合法值（=自动基准轨），不要在这里兜成别的轨
+        repairKey: els.exportRepairReferenceInput.value || "",
       });
       return { ...options, channelSummary: summarizeExportSelection(exportChoices, profileId, checked) };
     }
@@ -1513,6 +1558,7 @@
     function refreshExportPanels() {
       renderExportChannels();
       renderExportReference();
+      renderExportRepair();
       renderTakeHealthPanel();
     }
 
@@ -1540,6 +1586,16 @@
 
     els.exportReferenceInput.addEventListener("change", () => {
       exportReferenceKey = els.exportReferenceInput.value || "";
+    });
+
+    // 勾选只切换下拉的可用状态，候选本身不重算——基准轨的候选跟着
+    // 方案 / 输出通道的勾选走（refreshExportPanels → renderExportRepair）。
+    els.exportRepairEnabledInput.addEventListener("change", () => {
+      renderExportRepair();
+    });
+
+    els.exportRepairReferenceInput.addEventListener("change", () => {
+      exportRepairReferenceKey = els.exportRepairReferenceInput.value || "";
     });
 
     // 合并前体检：筛选、收起。

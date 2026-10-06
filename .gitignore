@@ -1,5 +1,6 @@
 # Reference checkout (kept locally, not a nested/submodule repository)
 /ref-audiotc/
+/ref-oss/
 
 # Browser automation output and local tools
 /.playwright-mcp/

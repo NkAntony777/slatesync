@@ -133,6 +133,67 @@ export function referenceChannelCandidates(choices, profileId = "resolve", check
   return choices.takes.flatMap(take => take.channels.filter(channel => kept.has(channel.key)));
 }
 
+// ---------------------------------------------------------------------------
+// 对齐修复（时长 / 偏移 / 时钟漂移）
+//
+// 界面只负责两件事：用户勾没勾、基准轨选哪条。哪个 take 真需要修、怎么补静音、
+// 丢弃多少 pre-roll、漂移多少，都是引擎（src/take-repair.js）自己的判断——UI 一旦
+// 也下结论，两处判据早晚会漂移，而且会把"工具说没问题"和"确实没问题"混为一谈。
+// ---------------------------------------------------------------------------
+
+/** 自动基准轨的 option value：空串。引擎约定"空 = 取第一条未被排除的轨"。 */
+export const REPAIR_REFERENCE_AUTO_VALUE = "";
+
+/** 自动档位的文案。刻意不写"推荐"——界面不替引擎判断哪条轨当基准更准。 */
+export const REPAIR_REFERENCE_AUTO_LABEL = "自动（第一条未被排除的轨）";
+
+/**
+ * 修复基准轨下拉的候选项。
+ *
+ * 候选取"主 Poly 里保留的节目通道"（复用 referenceChannelCandidates），因为
+ * 已经被方案排除或用户取消勾选的轨根本不会进输出，让它当基准没有意义。
+ * value 用 sourceTrackKey（"文件名:声道下标"），和引擎读的是同一个键。
+ */
+export function buildRepairReferenceOptions({
+  choices,
+  profileId = "resolve",
+  checkedKeys = new Set(),
+  value = REPAIR_REFERENCE_AUTO_VALUE,
+} = {}) {
+  const candidates = referenceChannelCandidates(choices, profileId, checkedKeys);
+  // 同一个 key 可能来自多个 take（不同目录下同名文件），先按 key 去重，
+  // 否则 <option> 里会出现两个一模一样的 value，选中哪个全看浏览器心情。
+  const seen = new Set([REPAIR_REFERENCE_AUTO_VALUE]);
+  const unique = candidates.filter(candidate => {
+    if (seen.has(candidate.key)) return false;
+    seen.add(candidate.key);
+    return true;
+  });
+  // 多个 take 时名字会撞（前缀一样），补上 take 标签才分得清是哪条。
+  // 用去重前的 candidates 判：撞 key 的那些 take 恰恰是最需要标签的。
+  const multiTake = new Set(candidates.map(candidate => candidate.takeKey)).size > 1;
+  const options = [
+    { value: REPAIR_REFERENCE_AUTO_VALUE, label: REPAIR_REFERENCE_AUTO_LABEL },
+    ...unique.map(candidate => ({
+      value: candidate.key,
+      label: `${multiTake ? `${candidate.takeLabel} · ` : ""}${candidate.recordName} · ${candidate.channelName}`,
+    })),
+  ];
+  const known = new Set(options.map(option => option.value));
+  // 候选变了（换方案、取消勾选、换 take 集合）就退回自动档，
+  // 免得把一条已经不存在的轨继续当基准传下去。
+  const selected = known.has(value) ? value : REPAIR_REFERENCE_AUTO_VALUE;
+  return {
+    options,
+    selected,
+    candidateCount: options.length - 1,
+    multiTake,
+    hintText: options.length > 1
+      ? "按这条轨测量每条分轨的时延与时钟漂移后再写入；选自动时用第一条未被排除的轨。尾部裁切不会自动执行。"
+      : "没有可选的基准轨：先在上面的「输出通道」里勾选至少一条节目通道。",
+  };
+}
+
 /**
  * 组装交给 poly-combine-controller 的选项。字段名与上游一致。
  * 非法组合一律抛中文错误：调用方是 guarded()，会原样弹给用户。
@@ -143,6 +204,8 @@ export function buildExportOptions({
   checkedKeys = new Set(),
   referenceSourceChannel = "",
   groupCount = 1,
+  repairEnabled = false,
+  repairKey = "",
 } = {}) {
   const profile = polyExportProfile(profileId);
   if (!choices) throw new Error("输出通道清单还没准备好，请重新点击「合并 Poly WAV」");
@@ -167,6 +230,16 @@ export function buildExportOptions({
     if (!kept.has(reference)) throw new Error("SyncRef 必须从主 Poly 保留的通道里选；被方案排除的 LTC 通道和未勾选的通道都不能当参考声");
     options.referenceSourceChannel = reference;
   }
+  // repair 永远显式给出 { enabled, referenceKey }，即使关闭也带 enabled:false。
+  // 省略字段等于让"没勾"和"没接这个功能"共用一种表示，测试和排查时都说不清；
+  // 引擎侧读 options.repair.enabled，两种写法它都能接。
+  // referenceKey 允许是空串（=自动），这里不做"必须有基准轨"的校验：
+  // 自动是合法选项，越权校验只会把引擎的判断抢到界面里。enabled:false 时它无意义，
+  // 但照样原样带过去，省掉一层 if 分支。
+  options.repair = {
+    enabled: Boolean(repairEnabled),
+    referenceKey: typeof repairKey === "string" ? repairKey.trim() : "",
+  };
   return options;
 }
 
