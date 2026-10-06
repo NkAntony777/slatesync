@@ -20,7 +20,7 @@
 >
 > **注意区分**：仓库根目录的 `index.html` 本身**不是**单文件程序。它依赖完整 `src/`、Service Worker 与图标，需要通过本地 HTTP 服务或 HTTPS 打开；单文件能力来自上面的构建产物。
 >
-> **重要素材先备份。**“合并 Poly”生成新文件，但直接写回时码会修改源 WAV；静音源 LTC 通道后，撤销按钮不能恢复音频内容。
+> **重要素材先备份。**「合并 Poly」生成新文件，不修改源分轨；直接写回时码会修改源 WAV。工具会在原地写入前自动生成 `<原名>.bak`，撤销时可真实还原音频内容——但 `.bak` 与源文件同处一个目录，**重要素材仍应另存他处**。
 
 ## 功能
 
@@ -31,6 +31,11 @@
 | WAV/BWF 时间码 | 查看、偏移和写入 `bext.TimeReference` / iXML 时间戳，提供修改预览与元数据撤销 |
 | Take 分组 | 按分轨文件名主干分组，适合 `ZOOM0001_Tr1.WAV`、`Tr2`、`LR` 等结构 |
 | Poly WAV | 连续通道映射、iXML track list、离散多通道布局；可排除已确认的 LTC 技术轨 |
+| 输出配置 | 网页可选 5 种输出方案、逐通道显式勾选、SyncRef 参考声道指认；输出目录可记忆复用，写入前检测同名覆盖 |
+| Take 体检 | 合并前逐 take 列出采样率/位深/时长/起始时码/LTC 可信度/帧率冲突问题，按 error/warn/info 分级；被静默排除的 take 也会说明原因 |
+| 验收清单 | 导出演算 14 项验收条目并写入 `_合板说明.txt`，区分"工具已确认"与"仍需在目标软件执行" |
+| 帧率覆盖 | 帧率支持全局默认 + per-take 覆盖，逐条记录显示帧率来源（界面设置 / 文件元数据 / per-take 覆盖） |
+| 写入备份 | 原地写入前生成 `<原名>.bak` 字节级备份，撤销可真实还原音频内容；备份开关与成本预估 |
 | 工作流导出 | Resolve、Sidus、PluralEyes、Syncaila、Archive 文件策略；可选 mono SyncRef 与中文合板说明 |
 | 视频与元数据 | 读取支持的 MOV/MP4 时间码，导入/导出 CSV、ALE 元数据 |
 | PWA | 安装与离线缓存机制；成功在线加载并缓存后可离线运行 |
@@ -83,21 +88,22 @@ node test/gen-demo.mjs demo
 
 ## 单文件版
 
-`npm run build:single` 会把 `index.html`、34 个 ES 模块和整份 CSS 打包进**一个 HTML 文件**，双击即可运行，不需要本地 HTTP 服务。运行时零依赖，素材全程不离开本机。
+`npm run build:single` 会把 `index.html`、全部被引用的 ES 模块和整份 CSS 打包进**一个 HTML 文件**，双击即可运行，不需要本地 HTTP 服务。运行时零依赖，素材全程不离开本机。
 
 ```bash
 npm install          # 仅构建需要 esbuild；打包产物本身无运行时依赖
 npm run build:single -- --repo https://github.com/NkAntony777/slatesync
 ```
 
-产物位于 `dist/bwf-timecode-singlefile-v1.5.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
+产物位于 `dist/bwf-timecode-singlefile-v1.6.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
 
 单文件版**保留完整功能**，包括写回时码和合并 Poly：`file://` 在 Chrome / Edge 属于 secure context，File System Access API（`showSaveFilePicker` / `showDirectoryPicker`）可用，因此不需要为降级功能改代码。
 
-与 PWA 版的两点差异：
+与 PWA 版的一点差异：
 
 - **不提供 PWA 离线缓存。** Service Worker 必须以同源独立脚本注册，无法内联进单文件；应用对该场景已有降级分支。
-- **输出方案仍只有 `resolve`。** 五种 Poly 方案的数据层与 CLI 均已就绪，但网页的选择控件尚未接入（见[命令行导出](#命令行导出)）。
+
+输出目录记忆依赖 IndexedDB，`file://` 下不可用时会降级为「每次导出会重新询问」，导出功能本身不受影响。输出方案、通道勾选、SyncRef、体检与验收清单在两版中功能一致。
 
 构建脚本保留 `<script type="module">` 与 ESM 输出格式，因为应用入口存在顶层 `await`；LTC Worker 本就从模板字符串经 Blob URL 创建，不需要额外文件。`app-version.js` 读取版本号的 `fetch` 由内联 shim 应答，因此版本号仍与仓库的 `CACHE_NAME` 同源。
 
@@ -106,7 +112,7 @@ npm run build:single -- --repo https://github.com/NkAntony777/slatesync
 | 检查项 | 结果 |
 |---|---|
 | 内联 module 启动、整页零外部请求 | 通过 |
-| 版本号来自内联 shim | 通过（`v1.5.0`） |
+| 版本号来自内联 shim | 通过（`v1.6.0`） |
 | File System Access API 可用 | 通过（不降级） |
 | 拖入演示素材、take 分组 | 通过 |
 | Blob URL Worker 解码 LTC 并回填 | 通过（`01:23:45:19`） |
@@ -125,20 +131,23 @@ FOLDER01/
   ZOOM0001_Tr6.WAV   已确认录入 LTC 的音轨
 ```
 
-1. 把文件或文件夹拖入页面，检查 take 分组和素材参数。
-2. 选择正确帧率，注意 **23.976 ≠ 24、29.97 ≠ 30**，以及 DF/NDF。
+1. 把文件或文件夹拖入页面，检查 take 分组和素材参数。**被排除在合并之外的 take 会显式列出原因**，不会静默消失。
+2. 选择帧率，注意 **23.976 ≠ 24、29.97 ≠ 30**，以及 DF/NDF。同一批素材帧率不一致时，在**帧率来源**面板为单个 take 单独覆盖，不必改全局设置。
 3. 点击 **从音轨提取时码**，查看成功结果与诊断报告。
-4. 对低电平、低质量、帧率不符的结果进行人工交叉复核；无法锁定时不要把猜测当正确时码。
-5. 点击 **合并 Poly WAV**，选择使用 LTC、预览或原始时间码。
-6. 默认 Resolve 清洁方案在启用 LTC 清理时，会移除**已确认**的 LTC 通道，不留下静音空轨；源分轨不受合并操作影响。
-7. 在目标剪辑软件中检查通道映射和同步，并核对开头、中段与结尾。
+4. **看 take 体检面板**：error 必须先解决，warn 需人工复核（尤其兜底/软同步时码）。无法锁定时不要把猜测当正确时码。
+5. 在**输出配置**面板选择输出方案、勾选要输出的通道，需要时指认 SyncRef 参考声道。
+6. 点击 **合并 Poly WAV**，选择使用 LTC、预览或原始时间码。Resolve 清洁方案在启用 LTC 清理时会移除**已确认**的 LTC 通道，不留下静音空轨；源分轨不受合并操作影响。
+7. 导出后**核对验收清单**：`fail` 必须处理，`manual` 项是要在目标软件里执行的动作。
+8. 在目标剪辑软件中检查通道映射和同步，并核对开头、中段与结尾。
+
+> 写回时码会修改源 WAV。工具会先自动生成 `<原名>.bak`；但重要素材仍应另存他处。
 
 > 文件名 `Tr6` 不等于 LTC。必须由检测或用户确认通道来源。
 > 静音、小电平、LR 混音和 ISO 都不能自动等同于“无用音轨”。
 
 ## 命令行导出
 
-软件方案选择、显式音轨选择和 SyncRef 已有数据层/CLI 接口，**当前网页没有对应的完整选择控件**。需要这些功能时可使用命令行：
+网页的**输出配置**面板已提供 5 种方案选择、逐通道显式勾选和 SyncRef 参考声道指认。命令行的价值在于**批量自动化**——按文件夹处理多个 take、输出机器可读清单，供 Resolve 之外的工作流或无人值守场景使用：
 
 ```bash
 node scripts/export-sync-package.mjs --help
@@ -184,6 +193,20 @@ PCM24 方案不会重采样。Float 超过 0 dBFS 转定点可能削波，导出
 
 详细说明：[中文声音合板指南](docs/声音合板指南.md)。
 
+## v1.6.0：合板体验优先
+
+v1.5.0 把 LTC 解码做到了边际收益极低的位置（780x 实时，长素材解码用户已感知不到；88 组极端压测 0 误锁，再投入换不来可感知的正确性提升）。v1.6.0 不再继续加算法，而是补上**决策**与**验收**这两个环节——它们才是用户实际失败的地方。
+
+**问题不在"能不能解出来"，而在"解出来之后谁来决定、谁来验证"。** 五处改动都指向这一点：
+
+1. **已存在但用户拿不到的能力接上了界面。** 5 种输出方案、逐通道显式勾选、SyncRef 参考声道指认，数据层与 CLI 早已就绪，网页版此前硬编码为 `resolve` 且没有任何选择入口。
+2. **合并前 take 体检。** 23 条检查项按 error / warn / info 分级，把原本在合并过程中以 `throw` 形式爆发、一次只暴露一条的校验，改为合并前一次列全。分轨时长不一致的 take 过去会被静默排除、用户看不到它去哪了，现在会被保留并说明原因。
+3. **导出演算清单。** 文档里的交付检查清单变成 14 项可执行状态，并写入 `_合板说明.txt`。刻意把「工具能给出的自动结论」（`state`）与「在目标软件里仍要执行的动作」（`guide`）分开——`pass` 不等于不需要人工操作。
+4. **per-take 帧率覆盖。** 帧率从全局单值改为「全局默认 + per-take 覆盖」，导入新素材不再把已有素材的设置一起改掉；界面逐条显示帧率来源。
+5. **写入备份与真撤销。** 原地写入前生成 `<原名>.bak` 字节级备份，撤销从备份真实还原音频内容。"撤销"此前只恢复元数据，被静音的 LTC 音频永久丢失。
+
+同时修复一个离线 PWA 缺陷：Service Worker 的硬编码预缓存清单遗漏了新增模块，导致首次加载后立刻断网的用户会加载失败。
+
 ## 算法演进与架构
 
 v1.5.0 全面融合了三条算法演进路线的成果（详见 [LTC 解码算法探索与融合沉淀](docs/LTC算法探索与融合沉淀.md)、[LTC 算法路线](docs/算法路线-LTC解码.md) 与 [LTC 前馈定时方案](docs/LTC前馈定时方案.md)）：
@@ -207,13 +230,15 @@ v1.5.0 全面融合了三条算法演进路线的成果（详见 [LTC 解码算�
 | DaVinci Resolve 20.3.3.10 / Windows | 20 项检查通过 | 合成素材导入与时码/波形同步，通道、起始时码和偏移验证 |
 | 浏览器与 PWA | Worker 解码、断网刷新通过 | 当前本地验证环境的脚本和缓存路径 |
 | 单文件版（`file://`，Chromium on Windows） | 11 项检查通过 | 内联启动、零外部请求、版本 shim、File System Access、take 分组、Blob Worker 解码、流程结束 |
+| 合板体验数据层测试 | 177 项通过（6 个文件） | per-take 帧率覆盖、take 体检 23 条 code、验收清单 14 项、写入备份语义、输出选项与同名检测 |
+| 新增合板 UI（`file://`，Chromium on Windows） | 14 项检查通过 | 36 个新 DOM 节点、5 个输出方案、通道勾选与全选/全不空、SyncRef 字段随方案显隐、帧率覆盖入口、备份开关、体检面板出现与 error 筛选、导出前验收清单保持隐藏 |
 | Sidus / PluralEyes / Syncaila | **尚未软件端实测** | 仅提供文件策略和流程说明，不等于兼容认证 |
 
 Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原声、主 Poly 波形同步、Mono SyncRef 波形同步。
 
 公开摘要：[Resolve 20.3.3 验证结果](docs/validation/resolve-20.3.3.json)。原始报告、测试视频和 WAV 可用 `scripts/resolve/` 中的脚本在本地重新生成，不包含在源码发布中。
 
-**未覆盖**所有真实拍摄素材、所有设备、全部帧率、真实超 4 GB RF64，或另外三款软件的实际往返。自动增益不能恢复量化归零和信息完全淹没；固定时间码偏移也不能代替物理同步时钟。
+**未覆盖**：所有真实拍摄素材、所有设备、全部帧率、真实超 4 GB RF64，或另外三款软件的实际往返。新增合板 UI 的浏览器验证使用合成 DataTransfer，拖入的桩句柄只有 `getFile`、没有 `createWritable`，因此**备份成本预估、输出目录记忆、覆盖确认弹窗和真正的文件写出这四条路径未经真机点击验证**。自动增益不能恢复量化归零和信息完全淹没；固定时间码偏移也不能代替物理同步时钟。
 
 ## 分发与部署
 
@@ -231,8 +256,10 @@ Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原
 
 - 默认应用流程没有音视频上传后端，媒体处理在本机进行。
 - 在线部署只托管应用资源；浏览器授权与素材读写仍在用户机器上。请自行评估所使用的托管服务及浏览器环境。
-- 直接写回 BWF 时码会修改源文件；先备份，再预览和确认。
-- **撤销是元数据恢复，不是完整文件备份。静音源 LTC 音频不能通过撤销恢复。**
+- 直接写回 BWF 时码会修改源文件。**写入前会自动生成 `<原名>.bak` 字节级备份**，撤销时从备份真实还原音频内容，因此"撤销"现在确实可逆。代价是磁盘占用接近翻倍，且 `.bak` 不会自动清理，需要时请自行删除。
+- 备份刻意不以 `.wav` 结尾：导入器只认 `.(wav|wave)`，若备份是 `.bak.wav` 会被下次导入当成一条真分轨重新载入。改名约定时必须同步加过滤。
+- 关闭备份开关后，撤销退化为只回写元数据（**不能**恢复被静音的 LTC 音频）。
+- **拖入单个文件（没有父目录句柄）时无法落备份**，写入会被拒绝。界面会在预览阶段提前提示，并给出「改用选择文件夹导入」或「关闭备份」两条出路。
 - 合并操作不修改源分轨，但网页批量输出可能覆盖目标目录中的同名文件；CLI 默认拒绝覆盖。
 - SyncRef 是辅助比较声音，不能误当成新增制作轨叠加播放。
 
@@ -241,9 +268,18 @@ Resolve 的实测覆盖 4/2/5/1 通道输出、时码替换、保留摄影机原
 Node.js 24+；本次验证使用 Node.js 24.12.0。核心回归测试不需要安装 npm 依赖：
 
 ```bash
-npm test                  # 核心回归测试（28 项底层 + 26 项业务）
-npm run test:all          # 全量测试（含 42 组主线程/Worker对齐、漂移补偿、性能门禁）
+npm test                  # 核心回归 + 合板体验数据层
+npm run test:all          # 全量（含主线程/Worker对齐、漂移补偿、性能门禁）
 npm run bench             # 多素材解码实时吞吐量基准
+```
+
+浏览器验证需要额外装 Playwright（用系统已安装的 Chrome/Edge，不额外下载浏览器）：
+
+```bash
+npm install --no-save playwright
+npm run build:single -- --repo https://github.com/NkAntony777/slatesync
+npm run verify:single     # 单文件版启动 / 零外部请求 / LTC 解码
+npm run verify:new-ui     # 新增合板 UI 的面板渲染与交互
 ```
 
 Resolve 软件端验证额外需要安装并运行 Resolve、配置可用的 Python 脚本接口，视频样本生成需要 FFmpeg。详见 [Resolve 验证说明](scripts/resolve/README.md)。这些不是网页使用的前提。
@@ -266,7 +302,10 @@ src/
   ltc-signal.js                    LTC_TUNING 参数中心与失败分类
   ltc-diagnostics.js               诊断与建议
   wave*.js                         WAV/BWF 解析与写入
-  poly-export-profiles.js          输出方案与通道策略
+  poly-export-profiles.js          输出方案、通道策略与方案文案
+  take-fps.js                      per-take 帧率覆盖存储与解析
+  take-health.js                   合并前 take 体检（23 条 code 契约）
+  acceptance-checklist.js          导出演算清单（14 项）与文本渲染
   sync-workflow.js                 中文交付说明和通道清单
 scripts/
   export-sync-package.mjs          本地命令行导出
@@ -277,6 +316,11 @@ test/
   ltc-drift.test.mjs               晶振温漂修正测试
   ltc-parity.test.mjs              主线程与 Worker 位对齐测试
   ltc-performance.test.mjs         解码性能上限门禁
+  take-fps / take-health / acceptance-checklist
+  write-backup / export-options / take-health-ui
+                                   合板体验数据层与 UI 视图模型
+  verify-single-file.mjs           单文件版浏览器校验（Playwright）
+  verify-new-ui.mjs                新增合板 UI 浏览器校验（Playwright）
 docs/                              合板指南、算法路线、方案沉淀、验证摘要
 ```
 

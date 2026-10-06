@@ -7,10 +7,53 @@ export const POLY_EXPORT_PROFILES = Object.freeze({
   archive: Object.freeze({ id: "archive", label: "保留原始编码", encoding: "source", ltcPolicy: "retain", reference: false }),
 });
 
+// 界面文案。用途和 LTC 策略抄自 docs/声音合板指南.md 的方案表，
+// 目的是让用户在点"合并"之前就知道这个方案会把 LTC 通道怎么处理——
+// 文件名里的 Tr6 之类只是命名线索，真正决定"是不是 LTC"的是检测结果。
+export const POLY_PROFILE_HINTS = Object.freeze({
+  resolve: Object.freeze({
+    usage: "DaVinci Resolve 清洁节目 Poly",
+    ltcText: "排除已确认的 LTC 通道",
+    encodingText: "多通道离散 PCM24",
+  }),
+  sidus: Object.freeze({
+    usage: "Sidus TC Sync：还需要 LTC 继续读时码",
+    ltcText: "保留 LTC 技术通道",
+    encodingText: "多通道离散 PCM24",
+  }),
+  pluraleyes: Object.freeze({
+    usage: "PluralEyes：主 Poly + 独立 SyncRef 做波形比较",
+    ltcText: "默认排除 LTC",
+    encodingText: "多通道离散 PCM24",
+  }),
+  syncaila: Object.freeze({
+    usage: "Syncaila：主 Poly + 独立 SyncRef / XML 交付",
+    ltcText: "默认排除 LTC",
+    encodingText: "多通道离散 PCM24",
+  }),
+  archive: Object.freeze({
+    usage: "归档：保留来源编码的副本",
+    ltcText: "保留 LTC 通道（勾选静音 LTC 轨时会在新文件里静音）",
+    encodingText: "保留源编码",
+  }),
+});
+
 export function polyExportProfile(value = "resolve") {
   const profile = POLY_EXPORT_PROFILES[value];
   if (!profile) throw new Error(`未知 Poly 导出方案：${value}`);
   return profile;
+}
+
+/**
+ * 给 UI 用的方案列表：profile 本身的字段 + 中文用途/LTC 策略文案。
+ * ltcPolicyText 是"这个方案对 LTC 做什么"的一句话说明，不是检测结果；
+ * 某个具体通道到底是不是 LTC，仍由 ltcResults 的检测结论决定。
+ */
+export function polyProfileOptions() {
+  return Object.values(POLY_EXPORT_PROFILES).map(profile => ({
+    ...profile,
+    ...(POLY_PROFILE_HINTS[profile.id] || { usage: "", ltcText: "", encodingText: profile.encoding }),
+  }));
 }
 
 export function sourceTrackKey(track) {

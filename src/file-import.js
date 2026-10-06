@@ -38,6 +38,8 @@ export function createFileImportController({
   setFpsValue,
   fpsSelectLabel,
   confirmMetadataFpsMismatch,
+  // 可选：per-take 覆盖 store（src/take-fps.js）。不注入时退回旧的全局 setFpsValue 行为。
+  takeFps = null,
   renderRows,
   setState,
   log,
@@ -90,6 +92,18 @@ export function createFileImportController({
     }
   }
 
+  /**
+   * 用户选择"采用元数据"时的落地方式：
+   * - 有 takeFps store：只给元数据确实写成该帧率的 take 建 per-take 覆盖，全局选择保持不变，
+   *   这样之前已经导入的素材不会被一起改掉。
+   * - 没有 store（旧接线）：退回全局 setFpsValue，行为与改动前一致。
+   * 返回实际生效的 take 列表，空数组表示走了全局回退。
+   */
+  function adoptMetadataFpsForTakes(newRecords, value) {
+    if (!takeFps?.adoptMetadataFps) return [];
+    return takeFps.adoptMetadataFps(newRecords, value) || [];
+  }
+
   async function finishImport(count, sourceLabel) {
     const records = getRecords();
     if (records.length <= count) return;
@@ -127,8 +141,15 @@ export function createFileImportController({
           metadata: fpsMeta,
         });
         if (useMetadata) {
-          setFpsValue(fpsMeta.value);
-          log(`FPS: switched to ${fpsSelectLabel(fpsMeta.value)} from file metadata`);
+          const appliedTakes = adoptMetadataFpsForTakes(newRecords, fpsMeta.value);
+          if (appliedTakes.length) {
+            const takeText = appliedTakes.slice(0, 5).map(take => take.takeKey).join(", ");
+            log(`FPS: ${fpsSelectLabel(fpsMeta.value)} applied to ${appliedTakes.length} take(s) from file metadata (${takeText}${appliedTakes.length > 5 ? ", …" : ""}); global setting kept at ${fpsSelectLabel(fpsInput.value)}`);
+            renderRows();
+          } else {
+            setFpsValue(fpsMeta.value);
+            log(`FPS: switched to ${fpsSelectLabel(fpsMeta.value)} from file metadata`);
+          }
         } else {
           log(`FPS: kept ${fpsSelectLabel(fpsInput.value)} despite file metadata ${fpsSelectLabel(fpsMeta.value)}`);
         }

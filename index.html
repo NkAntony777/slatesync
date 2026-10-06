@@ -124,6 +124,28 @@
           </div>
           <div id="diagBody" class="diag-body"></div>
         </section>
+
+        <section id="takeHealthSection" class="diagnostics take-health" aria-label="合并前体检" hidden>
+          <div class="diag-head">
+            <h2 class="diag-title">合并前体检</h2>
+            <span id="takeHealthSummary" class="diag-summary-text"></span>
+            <label class="take-health-filter" title="只显示 error；被筛掉的 take 仍会在下方注明数量，不会伪装成没问题">
+              <input id="takeHealthErrorsOnlyInput" type="checkbox">
+              <span>只显示 error</span>
+            </label>
+          </div>
+          <div id="takeHealthBody" class="diag-body"></div>
+        </section>
+
+        <section id="acceptanceSection" class="diagnostics acceptance" aria-label="交付验收清单" hidden>
+          <div class="diag-head">
+            <h2 class="diag-title">交付验收清单</h2>
+            <span id="acceptanceSummary" class="diag-summary-text"></span>
+            <button id="acceptanceCloseBtn" type="button">收起</button>
+          </div>
+          <p id="acceptanceNeedsHuman" class="acceptance-needs-human"></p>
+          <div id="acceptanceBody" class="diag-body acceptance-scroll"></div>
+        </section>
       </div>
 
       <aside class="side-rail">
@@ -168,7 +190,96 @@
               修改文件 FPS
             </button>
           </div>
+          <div id="combineExclusionNotice" class="rail-warning" role="status" hidden></div>
+          <div id="combineHealthNotice" class="combine-health-notice" role="status" hidden></div>
         </section>
+
+        <details class="rail-card rail-collapsible" id="exportOptionsCard" open>
+          <summary>输出配置 <span class="rail-tag">Poly</span><span class="chev" aria-hidden="true"></span></summary>
+          <div class="rail-card-body">
+            <label class="field">
+              输出方案
+              <div class="select-field" data-select>
+                <select id="exportProfileInput" aria-label="Poly 输出方案">
+                  <option value="resolve" selected>DaVinci Resolve</option>
+                  <option value="sidus">Sidus TC Sync</option>
+                  <option value="pluraleyes">PluralEyes</option>
+                  <option value="syncaila">Syncaila</option>
+                  <option value="archive">保留原始编码</option>
+                </select>
+                <button id="exportProfileButton" class="select-button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="exportProfileMenu">
+                  <span>DaVinci Resolve</span>
+                </button>
+                <div id="exportProfileMenu" class="select-menu" role="listbox" aria-label="Poly 输出方案" hidden></div>
+              </div>
+            </label>
+            <p id="exportProfileHint" class="rail-hint"></p>
+
+            <div class="export-reference" id="exportReferenceField" hidden>
+              <label class="field">
+                SyncRef 参考声道
+                <select id="exportReferenceInput" aria-label="SyncRef 参考声道"></select>
+              </label>
+              <p id="exportReferenceHint" class="rail-hint"></p>
+            </div>
+
+            <div class="export-channels">
+              <div class="export-channels-head">
+                <span>输出通道</span>
+                <span class="export-channels-tools">
+                  <button id="exportChannelsAllBtn" type="button" title="勾选全部通道">全选</button>
+                  <button id="exportChannelsNoneBtn" type="button" title="取消勾选全部通道">全不选</button>
+                </span>
+              </div>
+              <div id="exportChannelList" class="export-channel-list"></div>
+              <p id="exportChannelSummary" class="rail-hint"></p>
+            </div>
+
+            <div class="export-directory">
+              <div class="export-directory-head">
+                <span>输出目录</span>
+                <button id="exportDirectoryBtn" type="button" title="选择输出文件夹并（可选）记住">选择文件夹</button>
+              </div>
+              <p id="exportDirectoryLabel" class="rail-hint">未设置输出目录 — 每次导出都会询问</p>
+              <label class="check-row" title="勾选后浏览器会记住这个文件夹，下次导出直接复用；需要时仍会重新授权">
+                <input id="exportRememberDirectoryInput" type="checkbox" checked>
+                <span>记住这个文件夹</span>
+              </label>
+              <p class="rail-hint rail-hint-dim">Chrome 不允许网页直接写“下载 / 文稿 / 桌面”本身，请在里面新建并选择一个子文件夹。</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="rail-card rail-collapsible" id="backupCard">
+          <summary>写入前备份 <span class="rail-tag">撤销保障</span><span class="chev" aria-hidden="true"></span></summary>
+          <div class="rail-card-body">
+            <label class="check-row" title="写入 BWF 时码或静音 LTC 轨之前，先在源文件同目录留一份字节一致的副本，撤销时整份还原">
+              <input id="backupBeforeWriteInput" type="checkbox" checked>
+              <span>写入前备份（.bak）</span>
+            </label>
+            <p id="backupPlanSummary" class="rail-hint">—</p>
+            <div id="backupUnbackedNotice" class="rail-warning" role="status" hidden></div>
+            <p class="rail-hint rail-hint-dim">
+              备份命名为 <code>原名.WAV.bak</code>，与源文件同目录。<strong>不会自动清理</strong>；重新导入同一文件夹时会被忽略，不会混进素材列表。关闭开关后撤销只能回写元数据，无法恢复被静音的音频。
+            </p>
+          </div>
+        </details>
+
+        <details class="rail-card rail-collapsible" id="fpsSourceCard">
+          <summary>帧率来源 <span class="chev" aria-hidden="true"></span></summary>
+          <div class="rail-card-body">
+            <p id="fpsSourceSummary" class="rail-hint">导入素材后显示每个文件的帧率来源。</p>
+            <div class="fps-override-editor">
+              <div class="fps-override-head">
+                <select id="fpsOverrideAddInput" aria-label="选择要单独指定帧率的 take"></select>
+                <button id="fpsOverrideAddBtn" type="button" title="给选中的 take 单独指定帧率，不改动任何源文件">添加覆盖</button>
+                <button id="fpsOverrideClearAllBtn" type="button" title="清空全部 per-take 覆盖，全部回到界面全局设置">全部清除</button>
+              </div>
+              <p id="fpsOverrideHint" class="fps-override-hint">帧率候选与顶部「工程帧率」完全一致：23.976 ≠ 24、29.97 ≠ 30，DF 与 NDF 分开。</p>
+              <ul id="fpsOverrideList" class="fps-override-list"></ul>
+            </div>
+          </div>
+        </details>
 
         <details class="rail-card rail-collapsible">
           <summary>偏移校正 <span class="rail-tag">高级</span><span class="chev" aria-hidden="true"></span></summary>
@@ -422,8 +533,29 @@
     import { createTimecodeInputController } from "./src/timecode-input.js";
     import { createOffsetInputController } from "./src/offset-input.js";
     import { createPolyCombineController } from "./src/poly-combine-controller.js";
+    import { polyExportProfile, polyProfileOptions } from "./src/poly-export-profiles.js";
     import { createPreviewTableRenderer } from "./src/preview-table.js";
     import { setupPwa } from "./src/pwa.js";
+    import { createTakeFpsStore } from "./src/take-fps.js";
+    import { inspectTakes } from "./src/take-health.js";
+    import {
+      buildAcceptanceViewModel,
+      buildExportChoices,
+      buildExportOptions,
+      buildFpsOverrideViewModel,
+      buildTakeHealthViewModel,
+      commonVideoFpsValue,
+      confirmOverwriteOutputs,
+      createRememberedDirectoryStore,
+      describeDroppedTakes,
+      droppedTakesNoticeText,
+      droppedTakesSummaryText,
+      healthExcludedChannelKeys,
+      referenceChannelCandidates,
+      resolveCheckedKeys,
+      summarizeExportSelection,
+      takeHealthFindingsForChecklist,
+    } from "./src/confirm-flows.js";
     import { createTimeReferenceWriteController } from "./src/time-reference-write-controller.js";
     import { createUiStateController } from "./src/ui-state.js";
     import {
@@ -436,6 +568,7 @@
       recordKey,
       recordLabel,
       recordsByGroupFor,
+      shortGroupLabel,
     } from "./src/grouping.js";
 
     const WAV_SUFFIX = /\.(wav|wave)$/i;
@@ -524,6 +657,43 @@
       fpsMetadataExample: document.getElementById("fpsMetadataExample"),
       fpsMetadataCancelBtn: document.getElementById("fpsMetadataCancelBtn"),
       fpsMetadataPreviewBtn: document.getElementById("fpsMetadataPreviewBtn"),
+      combineExclusionNotice: document.getElementById("combineExclusionNotice"),
+      combineHealthNotice: document.getElementById("combineHealthNotice"),
+      takeHealthSection: document.getElementById("takeHealthSection"),
+      takeHealthSummary: document.getElementById("takeHealthSummary"),
+      takeHealthErrorsOnlyInput: document.getElementById("takeHealthErrorsOnlyInput"),
+      takeHealthBody: document.getElementById("takeHealthBody"),
+      acceptanceSection: document.getElementById("acceptanceSection"),
+      acceptanceSummary: document.getElementById("acceptanceSummary"),
+      acceptanceNeedsHuman: document.getElementById("acceptanceNeedsHuman"),
+      acceptanceBody: document.getElementById("acceptanceBody"),
+      acceptanceCloseBtn: document.getElementById("acceptanceCloseBtn"),
+      fpsOverrideAddInput: document.getElementById("fpsOverrideAddInput"),
+      fpsOverrideAddBtn: document.getElementById("fpsOverrideAddBtn"),
+      fpsOverrideClearAllBtn: document.getElementById("fpsOverrideClearAllBtn"),
+      fpsOverrideHint: document.getElementById("fpsOverrideHint"),
+      fpsOverrideList: document.getElementById("fpsOverrideList"),
+      exportOptionsCard: document.getElementById("exportOptionsCard"),
+      exportProfileInput: document.getElementById("exportProfileInput"),
+      exportProfileButton: document.getElementById("exportProfileButton"),
+      exportProfileMenu: document.getElementById("exportProfileMenu"),
+      exportProfileHint: document.getElementById("exportProfileHint"),
+      exportReferenceField: document.getElementById("exportReferenceField"),
+      exportReferenceInput: document.getElementById("exportReferenceInput"),
+      exportReferenceHint: document.getElementById("exportReferenceHint"),
+      exportChannelsAllBtn: document.getElementById("exportChannelsAllBtn"),
+      exportChannelsNoneBtn: document.getElementById("exportChannelsNoneBtn"),
+      exportChannelList: document.getElementById("exportChannelList"),
+      exportChannelSummary: document.getElementById("exportChannelSummary"),
+      exportDirectoryBtn: document.getElementById("exportDirectoryBtn"),
+      exportDirectoryLabel: document.getElementById("exportDirectoryLabel"),
+      exportRememberDirectoryInput: document.getElementById("exportRememberDirectoryInput"),
+      backupCard: document.getElementById("backupCard"),
+      backupBeforeWriteInput: document.getElementById("backupBeforeWriteInput"),
+      backupPlanSummary: document.getElementById("backupPlanSummary"),
+      backupUnbackedNotice: document.getElementById("backupUnbackedNotice"),
+      fpsSourceCard: document.getElementById("fpsSourceCard"),
+      fpsSourceSummary: document.getElementById("fpsSourceSummary"),
     };
     const { chooseMetadataFormat, showConfirmDialog } = createDialogController(els);
     const uiState = createUiStateController({ els });
@@ -534,13 +704,21 @@
       showToast,
       updateWriteProgress,
     } = uiState;
-    const fpsMetadata = createFpsMetadataController({ fpsInput: els.fpsInput });
+    // per-take 帧率覆盖的 store。getTakeGroupKeys 必须是 getter：refreshTakeGroups()
+    // 会重新赋值 takeGroupKeys，闭包直接捕获旧 Map 会让覆盖挂到已经作废的分组上。
+    const takeFps = createTakeFpsStore({
+      getTakeGroupKeys: () => takeGroupKeys,
+      getDefaultFpsValue: () => els.fpsInput.value,
+    });
+
+    const fpsMetadata = createFpsMetadataController({ fpsInput: els.fpsInput, takeFps });
     const {
       detectedMetadataFps,
       fpsSelectLabel,
       recordFps,
       recordFpsDisplay,
       recordFpsSource,
+      recordFpsSourceKind,
       recordFpsValue,
       setFpsValue,
     } = fpsMetadata;
@@ -549,6 +727,7 @@
       confirmCombinePoly,
       confirmLtcFpsMismatch,
       confirmMetadataFpsMismatch,
+      confirmOverwriteOutputs: showOverwriteConfirm,
       confirmSoftSyncWrite,
       confirmWriteChanges,
     } = confirmFlows;
@@ -577,6 +756,7 @@
 
     function refreshTakeGroups() {
       takeGroupKeys = detectTakeGroupKeys(records.filter(r => !r._meta && !r._video));
+      refreshExportOptions();
     }
 
     function isTakeTrack(record) {
@@ -683,8 +863,11 @@
       renderRows: () => renderRows(),
       renderDiagnostics: (reportsMap, options = {}) => {
         diagnosticsPanel.render(reportsMap, { fpsValue: options.fpsValue || els.fpsInput.value });
+        // LTC 检测结论会改变"哪些通道被确认为 LTC"，输出配置面板要跟着重算默认勾选。
+        refreshExportOptions();
         updateFlowSteps();
       },
+      takeFps,
     });
 
     const previewTable = createPreviewTableRenderer({
@@ -730,7 +913,401 @@
 
     function renderRows() {
       previewTable.renderRows();
+      renderCombineExclusionNotice();
+      renderTakeHealthPanel();
+      renderFpsSourceSummary();
+      renderBackupNotice();
       updateFlowSteps();
+    }
+
+    // -------------------------------------------------------------------------
+    // 输出配置面板：方案 / 通道 / SyncRef / 输出目录
+    //
+    // 状态只记"用户亲手点过"的通道（exportExplicitChecked）；没点过的跟随方案默认，
+    // 这样切换 resolve ↔ archive 时 LTC 通道的默认勾选会自己跟着变，而不是把
+    // 用户的选择冻在第一次渲染的状态上。真正的合法性判断在 confirm-flows.js 里，
+    // 这里只负责把选择画出来。
+    // -------------------------------------------------------------------------
+    const exportExplicitChecked = new Map();
+    let exportReferenceKey = "";
+    let exportChoices = { takes: [], allKeys: [], confirmedLtcKeys: new Set() };
+    let exportGroups = [];
+    const outputDirectory = createRememberedDirectoryStore();
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+
+    function exportProfileId() {
+      return els.exportProfileInput.value || "resolve";
+    }
+
+    function checkedKeysForPanel() {
+      return resolveCheckedKeys(exportChoices, exportProfileId(), exportExplicitChecked);
+    }
+
+    function renderExportProfileHint() {
+      const profile = polyProfileOptions().find(entry => entry.id === exportProfileId());
+      els.exportProfileHint.textContent = profile ? `${profile.usage}；LTC：${profile.ltcText}；编码：${profile.encodingText}。` : "";
+    }
+
+    function renderExportChannels() {
+      const profileId = exportProfileId();
+      const profile = polyExportProfile(profileId);
+      const checked = checkedKeysForPanel();
+      if (!exportChoices.takes.length) {
+        els.exportChannelList.innerHTML = `<p class="rail-hint">还没有可合并的分轨 take。导入同一 take 的多条分轨后，这里会列出所有源通道。</p>`;
+        els.exportChannelSummary.textContent = "";
+        return;
+      }
+      els.exportChannelList.innerHTML = exportChoices.takes.map(take => `
+        <div class="export-channel-take">
+          <div class="export-take-label">${escapeHtml(take.takeLabel)}</div>
+          ${take.channels.map(channel => {
+            const autoExcluded = channel.confirmedLtc && profile.ltcPolicy === "exclude";
+            const ltcTitle = channel.confirmedLtc
+              ? `由 LTC 检测确认${channel.ltcTimecode ? `（读到 ${channel.ltcTimecode}）` : ""}；文件名里的 Tr 编号只是命名线索`
+              : "未检测到 LTC；文件名里的 Tr 编号不能作为 LTC 依据";
+            return `<label class="export-channel-row${autoExcluded ? " auto-excluded" : ""}">
+              <input type="checkbox" data-channel-key="${escapeHtml(channel.key)}"${checked.has(channel.key) ? " checked" : ""}>
+              <span class="export-channel-name">${escapeHtml(channel.recordName)} · ${escapeHtml(channel.channelName)}</span>
+              ${channel.confirmedLtc ? `<span class="export-channel-tag ltc" title="${escapeHtml(ltcTitle)}">已确认 LTC</span>` : ""}
+              ${autoExcluded ? `<span class="export-channel-tag auto" title="本方案会把它从新 Poly 中物理移除，勾不勾都会被移除">本方案自动移除</span>` : ""}
+            </label>`;
+          }).join("")}
+        </div>`).join("");
+      els.exportChannelSummary.textContent = summarizeExportSelection(exportChoices, profileId, checked);
+    }
+
+    function renderExportReference() {
+      const profile = polyExportProfile(exportProfileId());
+      if (!profile.reference) {
+        els.exportReferenceField.hidden = true;
+        exportReferenceKey = "";
+        return;
+      }
+      els.exportReferenceField.hidden = false;
+      const candidates = referenceChannelCandidates(exportChoices, profile.id, checkedKeysForPanel());
+      const multiTake = exportGroups.length > 1;
+      // 候选变了（换了方案、取消了勾选、换了 take 集合）就丢掉旧选择，
+      // 免得把一个已经被排除的通道继续当成 SyncRef。
+      exportReferenceKey = candidates.some(candidate => candidate.key === exportReferenceKey) && !multiTake
+        ? exportReferenceKey
+        : "";
+      els.exportReferenceInput.innerHTML = `<option value="">（不生成 SyncRef）</option>${
+        multiTake ? "" : candidates.map(candidate => `<option value="${escapeHtml(candidate.key)}"${candidate.key === exportReferenceKey ? " selected" : ""}>${escapeHtml(candidate.recordName)} · ${escapeHtml(candidate.channelName)}</option>`).join("")
+      }`;
+      els.exportReferenceInput.disabled = multiTake;
+      els.exportReferenceHint.textContent = multiTake
+        ? `SyncRef 需要逐 take 指定：当前有 ${exportGroups.length} 个 take，一次导出一个时才能选。不选则只输出主 Poly。`
+        : candidates.length
+          ? "只能选主 Poly 里保留的节目通道；被方案排除的 LTC 通道和未勾选的通道不会出现在这里。"
+          : "当前没有可用的参考声道：先勾选至少一条节目通道。";
+    }
+
+    function refreshExportOptions(groups = combineEligibleGroups()) {
+      exportGroups = groups;
+      exportChoices = buildExportChoices(groups, { ltcResults });
+      renderExportProfileHint();
+      renderExportChannels();
+      renderExportReference();
+      // 体检结论依赖"哪些通道会被剔除"，所以方案/通道一变就得跟着重算。
+      // 这同时覆盖了 LTC 提取完成与时码预览变化两条路径——它们都会走到这里。
+      renderTakeHealthPanel();
+    }
+
+    function collectExportOptions(groups) {
+      refreshExportOptions(groups);
+      const profileId = exportProfileId();
+      const checked = checkedKeysForPanel();
+      const options = buildExportOptions({
+        profileId,
+        choices: exportChoices,
+        checkedKeys: checked,
+        referenceSourceChannel: els.exportReferenceInput.value || "",
+        groupCount: groups.length,
+      });
+      return { ...options, channelSummary: summarizeExportSelection(exportChoices, profileId, checked) };
+    }
+
+    // combineEligibleGroupsFor() 会把时长不一致的 take 整个过滤掉，界面以前一声不吭。
+    // 这里把差额和原因摆在「合并 Poly WAV」按钮正下方。
+    function currentDroppedTakes() {
+      const eligibleGroups = combineEligibleGroups();
+      return {
+        eligibleGroups,
+        dropped: describeDroppedTakes({ recordsByGroup: recordsByGroup(), takeGroupKeys, eligibleGroups }),
+      };
+    }
+
+    function renderCombineExclusionNotice() {
+      const { eligibleGroups, dropped } = currentDroppedTakes();
+      if (!dropped.count) {
+        els.combineExclusionNotice.hidden = true;
+        els.combineExclusionNotice.textContent = "";
+        return;
+      }
+      els.combineExclusionNotice.innerHTML = [
+        eligibleGroups.length ? "" : "<strong>当前没有可合并的分轨 take。</strong>",
+        droppedTakesNoticeText(dropped),
+        dropped.byReason["duration-mismatch"]
+          ? "时长不一致的 take 无法逐样本对齐，会整组被跳过：请在录音机侧确认没有被截断的分轨，或分批单独导出。"
+          : "",
+        dropped.byReason["not-a-take"] ? "只有一个文件的 take 说明文件名没有成对的分轨编号（Tr/L/R 之类），可改名为 `take01_Tr1` / `take01_Tr2` 再导入。" : "",
+      ].filter(Boolean).join("<br>");
+      els.combineExclusionNotice.hidden = false;
+    }
+
+    // 合并前体检。
+    //
+    // 体检的 take 范围刻意比 combineEligibleGroupsFor() 宽：后者把时长不一致的 take
+    // 整个静默过滤掉，用户永远看不到"为什么这个 take 不能合"。这里保留它们，
+    // 并用 duration-mismatch 说明原因——丢弃是静默的，告知不能也是。
+    //
+    // 面板的文案全部来自 src/take-health.js（中文、已写得很具体），这里只排版。
+    function currentTakeHealth() {
+      return inspectTakes({
+        records: records.filter(record => !record._meta && !record._video),
+        takeGroupKeys,
+        includeUngrouped: false,
+        ltcResults,
+        previews,
+        ltcSourceChannels: exportChoices.confirmedLtcKeys,
+        // 体检看的是"这次导出真正会剔除谁"，所以用最终保留集合的补集，
+        // 而不是界面上手动勾掉的那部分——方案自动排除的 LTC 同样算数。
+        excludedChannelKeys: healthExcludedChannelKeys(exportChoices, exportProfileId(), checkedKeysForPanel()),
+        videoFpsValue: commonVideoFpsValue(records),
+        parseFps,
+        // 传 recordFpsValue（含 per-take 覆盖）而不是只看文件元数据：
+        // 覆盖改的就是实际解析用的帧率，冲突判断必须看到覆盖后的结果。
+        fpsValueForRecord: recordFpsValue,
+      });
+    }
+
+    let takeHealthView = null;
+
+    function renderTakeHealthPanel() {
+      const model = buildTakeHealthViewModel(currentTakeHealth(), { errorsOnly: els.takeHealthErrorsOnlyInput.checked });
+      takeHealthView = model;
+
+      if (!model.available) {
+        els.takeHealthSection.hidden = true;
+        els.takeHealthSummary.textContent = "";
+      } else {
+        els.takeHealthSummary.textContent = model.summaryText;
+        els.takeHealthBody.innerHTML = [
+          model.takes.map(take => {
+            const issues = take.findings.map(finding => {
+              const files = finding.records.length ? `<div class="take-health-issue-files">${finding.records.map(escapeHtml).join(" · ")}</div>` : "";
+              const channels = finding.channels.length ? `<div class="take-health-issue-files">涉及通道：${finding.channels.map(escapeHtml).join("、")}</div>` : "";
+              return `<div class="diag-issue ${finding.severity}">`
+                + `<div class="take-health-issue-head">`
+                + `<span class="diag-status ${finding.severity === "error" ? "fail" : finding.severity === "warn" ? "warn" : "pending"}">${finding.meta.icon}</span>`
+                + `<span class="take-health-issue-title">${escapeHtml(finding.title)}</span>`
+                + `<span class="take-health-issue-code">${escapeHtml(finding.code)}</span>`
+                + `</div>`
+                + `<div class="take-health-issue-detail">${escapeHtml(finding.detail)}</div>`
+                + (finding.suggestion ? `<div class="take-health-issue-suggestion">${escapeHtml(finding.suggestion)}</div>` : "")
+                + channels + files
+                + `</div>`;
+            }).join("");
+            const hidden = take.hiddenCount > 0 ? `<div class="take-health-hidden">还有 ${take.hiddenCount} 条同类问题未展开</div>` : "";
+            const statusClass = take.severity === "error" ? "fail" : take.severity === "warn" ? "warn" : take.counts.error === 0 && !take.warnCount ? "ok" : "pending";
+            const statusIcon = take.severity === "error" ? "✗" : take.severity === "warn" ? "⚠" : "✓";
+            return `<details class="diag-take ${take.severity === "error" ? "fail" : take.severity === "warn" ? "warn" : ""}"${take.severity === "error" ? " open" : ""}>`
+              + `<summary class="diag-take-head">`
+              + `<span class="diag-status ${statusClass}">${statusIcon}</span>`
+              + `<span class="diag-take-name">${escapeHtml(take.takeLabel)}</span>`
+              + `<span class="diag-headline">${take.errorCount ? `error ${take.errorCount}` : take.warnCount ? `warn ${take.warnCount}` : "无问题"}</span>`
+              + (take.findings.length ? `<span class="diag-issue-count">${take.findings.length}</span>` : "")
+              + `</summary>`
+              + (issues ? `<div class="diag-issues">${issues}${hidden}</div>` : `<div class="take-health-hidden">${escapeHtml(take.statusText)}</div>`)
+              + `</details>`;
+          }).join(""),
+          model.hiddenTakeCount
+            ? `<div class="take-health-hidden">「只显示 error」已筛掉 ${model.hiddenTakeCount} 个没有 error 的 take —— 它们不是没问题，是这里只列 error。</div>`
+            : "",
+        ].join("");
+        els.takeHealthSection.hidden = false;
+      }
+
+      // 「合并 Poly WAV」按钮旁的计数。用户点之前就得知道有没有 error。
+      const text = model.combineNoticeText;
+      els.combineHealthNotice.hidden = !text;
+      els.combineHealthNotice.classList.toggle("error", model.hasErrors);
+      els.combineHealthNotice.innerHTML = model.hasErrors
+        ? `<span class="rail-notice-title">${model.errorTakeCount} 个 take 有 error</span>${escapeHtml(text)}`
+        : escapeHtml(text);
+    }
+
+    // 交付验收清单面板。
+    //
+    // 关键语义（src/acceptance-checklist.js 的契约）：state 是工具的自动结论，
+    // pass 不等于不用动手；guide 是"在目标软件里仍要执行的动作"，对任意 state
+    // 都可能存在。所以 guide 必须显示——把它藏掉，这个模块就只剩一堆彩色标签。
+    //
+    // 勾选状态按 outputName + item id 存，批量导出时每个 take 各有一份，
+    // 不会互相覆盖。
+    const acceptanceChecked = new Set();
+    let lastAcceptanceEntries = [];
+
+    function showAcceptanceChecklist(checklists) {
+      const list = Array.isArray(checklists) ? checklists.filter(entry => entry?.checklist) : [];
+      if (!list.length) return null;
+      // 勾选后要重画整块（复选框状态写进 DOM），所以留一份原始清单在手上。
+      lastAcceptanceEntries = list;
+      const models = list.map(entry => buildAcceptanceViewModel(entry.checklist, {
+        checked: new Set([...acceptanceChecked].filter(key => key.startsWith(`${entry.result?.name || entry.takeKey}::`))),
+      }));
+      const totals = models.reduce((sum, model) => ({
+        total: sum.total + model.summary.total,
+        pass: sum.pass + model.summary.pass,
+        fail: sum.fail + model.summary.fail,
+        manual: sum.manual + model.summary.manual,
+        na: sum.na + model.summary.na,
+      }), { total: 0, pass: 0, fail: 0, manual: 0, na: 0 });
+
+      els.acceptanceSummary.textContent = list.length > 1
+        ? `${list.length} 个文件 · 共 ${totals.total} 项 · 通过 ${totals.pass} · 问题 ${totals.fail} · 需人工确认 ${totals.manual} · 不适用 ${totals.na}`
+        : models[0].summaryText;
+      els.acceptanceNeedsHuman.textContent = models[0].needsHumanText;
+
+      els.acceptanceBody.innerHTML = models.map((model, index) => {
+        const entry = list[index];
+        const name = entry.result?.name || entry.takeKey || "本次导出";
+        const head = list.length > 1 ? `<div class="acceptance-group-head" style="margin-top:10px">${escapeHtml(name)}</div>` : "";
+        const groups = model.groups.map(group => `<div class="acceptance-group ${group.state}">`
+          + `<div class="acceptance-group-head">${group.icon} ${escapeHtml(group.label)}（${group.count}）</div>`
+          + group.items.map(item => {
+            const key = `${name}::${item.id}`;
+            const evidence = item.evidence ? `<div class="accept-item-evidence">${escapeHtml(typeof item.evidence === "string" ? item.evidence : JSON.stringify(item.evidence))}</div>` : "";
+            return `<label class="${item.meta.className}${item.checked ? " done" : ""}">`
+              + `<input type="checkbox" data-accept-key="${escapeHtml(key)}"${item.checked ? " checked" : ""}>`
+              + `<span class="accept-item-head">`
+              + `<span class="accept-item-state">${item.meta.icon} ${escapeHtml(item.meta.label)}</span>`
+              + `<span class="accept-item-label">${escapeHtml(item.label)}</span>`
+              + `</span>`
+              + `<span class="accept-item-detail">${escapeHtml(item.detail)}</span>`
+              + (item.hasGuide ? `<span class="accept-item-guide">${escapeHtml(item.guide)}</span>` : "")
+              + evidence
+              + `</label>`;
+          }).join("")
+          + `</div>`).join("");
+        const meta = [
+          model.outputName ? `输出：${model.outputName}` : "",
+          model.profileLabel ? `方案：${model.profileLabel}` : "",
+          model.channels ? `通道：${model.channels}` : "",
+        ].filter(Boolean).join(" · ");
+        return head + groups + (meta ? `<div class="acceptance-meta">${escapeHtml(meta)}</div>` : "");
+      }).join("");
+
+      els.acceptanceSection.hidden = false;
+      // prefers-reduced-motion 下去掉 smooth 位移，焦点仍会移过去。
+      els.acceptanceSection.scrollIntoView({ block: "nearest", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+      return totals;
+    }
+
+    function prefersReducedMotion() {
+      return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+    }
+
+    function renderBackupNotice() {
+      const plan = timeReferenceWrite.writePlan();
+      const unbacked = plan.unbackedRecords;
+      els.backupPlanSummary.textContent = !plan.enabled
+        ? "备份已关闭：写入仍然可用，但撤销只能回写时码元数据，被静音的 LTC 音频无法恢复。"
+        : plan.fileCount
+          ? `本次写入会先在源文件同目录复制 ${plan.fileCount} 个文件（约 ${plan.totalBytesText}）为 .bak，再动原文件。`
+          : "暂无可备份的 WAV（视频文件只导出元数据，不会修改原文件）。";
+      if (!unbacked.length) {
+        els.backupUnbackedNotice.hidden = true;
+        els.backupUnbackedNotice.textContent = "";
+        return;
+      }
+      els.backupUnbackedNotice.innerHTML = [
+        `<strong>${unbacked.length} 个文件拿不到所在目录句柄，无法落备份：</strong>`,
+        `${unbacked.slice(0, 5).map(name => `<code>${escapeHtml(name)}</code>`).join("、")}${unbacked.length > 5 ? ` 等 ${unbacked.length} 个` : ""}`,
+        "拖入单个文件时浏览器不会给出目录句柄。为了不写出撤销不回来的文件，<strong>这些文件会被拒绝写入</strong>：请改用「选择文件夹」方式导入，或关闭上面的备份开关后再写。",
+      ].join("<br>");
+      els.backupUnbackedNotice.hidden = false;
+    }
+
+    function renderFpsSourceSummary() {
+      const counts = { override: 0, metadata: 0, ui: 0 };
+      for (const record of records) {
+        if (record._meta || record._video) continue;
+        const kind = recordFpsSourceKind(record);
+        if (kind in counts) counts[kind] += 1;
+      }
+      els.fpsSourceSummary.textContent = records.length
+        ? `per-take 覆盖 ${counts.override} 个文件 · 文件元数据 ${counts.metadata} 个 · 界面全局设置 ${counts.ui} 个（界面设置：${els.fpsInput.value}）`
+        : "导入素材后显示每个文件的帧率来源。";
+      renderFpsOverrideEditor();
+    }
+
+    // per-take 帧率覆盖编辑器。
+    //
+    // 候选帧率从 els.fpsInput 的 <option> 直接读，不另抄一份列表——23.976 ≠ 24、
+    // 29.97 ≠ 30、DF 与 NDF 分开，这三处一旦漂移就是静默的错帧。
+    // 渲染是 innerHTML + escapeHtml，值全部来自 store 与 <option>，不含用户自由输入。
+    function fpsOverrideCandidates() {
+      return Array.from(els.fpsInput.options).map(option => ({ value: option.value, label: option.textContent.trim() }));
+    }
+
+    function renderFpsOverrideEditor() {
+      const trackRecords = records.filter(record => !record._meta && !record._video);
+      // 每个 take 取第一条分轨作为代表：编辑器问的是"这个 take 现在按哪个帧率解析"，
+      // 而这个值必须走 record 级解析（含 iXML / bext aSPEED / per-take 覆盖），
+      // 直接用 resolveFpsValueForTake 会漏掉文件元数据，把 23.976 的 take 显示成 24。
+      const firstRecordOfTake = new Map();
+      for (const record of trackRecords) {
+        const key = takeFps.takeKeyForRecord(record);
+        if (key && !firstRecordOfTake.has(key)) firstRecordOfTake.set(key, record);
+      }
+      const model = buildFpsOverrideViewModel({
+        candidates: fpsOverrideCandidates(),
+        takeKeys: takeFps.distinctTakeKeysFor(trackRecords),
+        overrides: takeFps.listOverrides(),
+        defaultValue: els.fpsInput.value,
+        takeLabelFor: shortGroupLabel,
+        sourceKindForTake: takeKey => recordFpsSourceKind(firstRecordOfTake.get(takeKey) || {}),
+        resolvedValueForTake: (takeKey, fallback) => {
+          const record = firstRecordOfTake.get(takeKey);
+          return record ? takeFps.resolveFpsValueForRecord(record, fallback) : takeFps.resolveFpsValueForTake(takeKey, fallback);
+        },
+      });
+
+      els.fpsOverrideHint.textContent = model.summaryText;
+
+      // 「添加覆盖」下拉：候选是实际存在、且还没有覆盖的 take。
+      const previous = els.fpsOverrideAddInput.value;
+      els.fpsOverrideAddInput.innerHTML = model.addableTakes.length
+        ? model.addableTakes.map(take => `<option value="${escapeHtml(take.takeKey)}">${escapeHtml(take.takeLabel)}</option>`).join("")
+        : `<option value="">${model.rows.length ? "所有 take 都已设置覆盖" : "还没有分轨 take"}</option>`;
+      if (model.addableTakes.some(take => take.takeKey === previous)) els.fpsOverrideAddInput.value = previous;
+      els.fpsOverrideAddBtn.disabled = !model.addableTakes.length;
+      els.fpsOverrideClearAllBtn.disabled = !model.overrideCount;
+
+      els.fpsOverrideList.innerHTML = model.rows.map(row => {
+        const options = row.options
+          .map(option => `<option value="${escapeHtml(option.value)}"${option.value === row.value ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+          .join("");
+        return `<li class="fps-override-row${row.hasOverride ? "" : " plain"}">`
+          + `<span class="fps-override-name" title="${escapeHtml(row.takeKey)}">${escapeHtml(row.takeLabel)}</span>`
+          + `<select data-fps-take="${escapeHtml(row.takeKey)}" aria-label="${escapeHtml(row.takeLabel)} 的帧率">${options}</select>`
+          + `<span class="fps-override-source">${escapeHtml(row.sourceText)} · 当前 ${escapeHtml(row.value)}</span>`
+          + (row.hasOverride ? `<button class="fps-override-clear" type="button" data-fps-clear="${escapeHtml(row.takeKey)}">清除</button>` : "")
+          + `</li>`;
+      }).join("");
+    }
+
+    async function renderDirectoryLabel() {
+      const info = outputDirectory.describe();
+      els.exportDirectoryLabel.textContent = info.text;
+      els.exportDirectoryBtn.disabled = !outputDirectory.canPick();
+      els.exportDirectoryBtn.title = outputDirectory.canPick()
+        ? "选择输出文件夹并（可选）记住"
+        : "当前浏览器不支持选择文件夹（需要 Chrome / Edge），将逐个询问保存位置";
     }
 
     const polyCombine = createPolyCombineController({
@@ -742,6 +1319,27 @@
       shouldMuteLtc: () => els.muteLtcInput.checked,
       groupLabel,
       getFpsValue: () => els.fpsInput.value,
+      getExportOptions: groups => collectExportOptions(groups),
+      getOutputDirectory: () => outputDirectory.remembered(),
+      pickOutputDirectory: async () => {
+        const picked = await outputDirectory.pick({ remember: els.exportRememberDirectoryInput.checked });
+        await renderDirectoryLabel();
+        if (picked.cancelled) return null;
+        if (!picked.handle) throw new Error("无法使用这个输出文件夹。Chrome 不允许网页直接写入某些受保护的常用文件夹（如“下载”“文稿”“桌面”本身）；请在其中新建并选择一个子文件夹，例如 Downloads/AudioTCChange_Poly。");
+        return picked.handle;
+      },
+      requestOverwrite: (names, options) => showOverwriteConfirm(names, {
+        showConfirmDialog,
+        profileLabel: options?.profileLabel || "",
+      }),
+      describeDroppedTakeGroups: () => currentDroppedTakes().dropped,
+      getTakeHealthView: () => takeHealthView,
+      // 体检还没跑过（理论上不会，renderRows 一开始就会渲染）就传 undefined，
+      // 让 acceptance-checklist 把该项降级成 manual，而不是谎称"体检无 error"。
+      getTakeHealthFindings: takeKey => (takeHealthView?.available
+        ? takeHealthFindingsForChecklist(takeHealthView, takeKey)
+        : undefined),
+      showAcceptanceChecklist,
       setCombinedPolyKeys: keys => { combinedPolyKeys = keys; },
       setState,
       updateWriteProgress,
@@ -762,6 +1360,7 @@
       setLastUndoBatch: next => { lastUndoBatch = next; },
       getLtcResults: () => ltcResults,
       shouldMuteLtc: () => els.muteLtcInput.checked,
+      shouldBackup: () => els.backupBeforeWriteInput.checked,
       setChangedTimeReferences: next => { changedTimeReferences = next; },
       refreshTakeGroups,
       offsetInput,
@@ -827,6 +1426,9 @@
       selectedRecordKeys = new Set();
       changedTimeReferences = new Map();
       directoryHandle = null;
+      exportExplicitChecked.clear();
+      exportReferenceKey = "";
+      refreshExportOptions();
       els.applyBtn.disabled = true;
       els.undoBtn.disabled = true;
       els.previewBtn.disabled = true;
@@ -904,6 +1506,109 @@
     fpsWrite.bindEvents({ guarded });
 
     initCustomSelect(els.fpsInput, els.fpsSelectButton, els.fpsSelectMenu);
+    initCustomSelect(els.exportProfileInput, els.exportProfileButton, els.exportProfileMenu);
+
+    // 方案 / 通道变化后要一起刷的三块：通道列表、SyncRef 候选、合并前体检
+    // （体检的 "no-channel-after-exclusions" / "ltc-still-retained" 依赖最终保留集合）。
+    function refreshExportPanels() {
+      renderExportChannels();
+      renderExportReference();
+      renderTakeHealthPanel();
+    }
+
+    els.exportProfileInput.addEventListener("change", () => {
+      renderExportProfileHint();
+      refreshExportPanels();
+    });
+
+    els.exportChannelList.addEventListener("change", event => {
+      const key = event.target?.dataset?.channelKey;
+      if (!key) return;
+      exportExplicitChecked.set(key, event.target.checked);
+      refreshExportPanels();
+    });
+
+    els.exportChannelsAllBtn.addEventListener("click", () => {
+      for (const key of exportChoices.allKeys) exportExplicitChecked.set(key, true);
+      refreshExportPanels();
+    });
+
+    els.exportChannelsNoneBtn.addEventListener("click", () => {
+      for (const key of exportChoices.allKeys) exportExplicitChecked.set(key, false);
+      refreshExportPanels();
+    });
+
+    els.exportReferenceInput.addEventListener("change", () => {
+      exportReferenceKey = els.exportReferenceInput.value || "";
+    });
+
+    // 合并前体检：筛选、收起。
+    els.takeHealthErrorsOnlyInput.addEventListener("change", () => renderTakeHealthPanel());
+    els.acceptanceCloseBtn.addEventListener("click", () => {
+      els.acceptanceSection.hidden = true;
+    });
+
+    // 验收清单的勾选。勾选只代表"我在目标软件里做完了"，不代表工具验证过它。
+    els.acceptanceBody.addEventListener("change", event => {
+      const key = event.target?.dataset?.acceptKey;
+      if (!key) return;
+      if (event.target.checked) acceptanceChecked.add(key);
+      else acceptanceChecked.delete(key);
+      showAcceptanceChecklist(lastAcceptanceEntries);
+    });
+
+    // per-take 帧率覆盖：写入 store → renderRows() 立刻生效。
+    els.fpsOverrideAddBtn.addEventListener("click", () => {
+      const takeKey = els.fpsOverrideAddInput.value;
+      if (!takeKey) return;
+      takeFps.setOverride(takeKey, els.fpsInput.value);
+      renderRows();
+      log(`FPS per-take: ${shortGroupLabel(takeKey)} → ${els.fpsInput.value}（仅本次会话，不改动任何源文件）`);
+    });
+
+    els.fpsOverrideClearAllBtn.addEventListener("click", () => {
+      const count = takeFps.overrideCount();
+      if (!count) return;
+      takeFps.clearAll();
+      renderRows();
+      log(`FPS per-take: 清除 ${count} 条覆盖，全部回到界面全局设置 ${els.fpsInput.value}`);
+    });
+
+    els.fpsOverrideList.addEventListener("change", event => {
+      const select = event.target.closest?.("select[data-fps-take]");
+      if (!select) return;
+      const takeKey = select.dataset.fpsTake;
+      // 选项表里没有的值也要能存：时码帧率不限于下拉列表，
+      // 界面显示的是"不在帧率列表中"而不是静默丢弃这次修改。
+      takeFps.setOverride(takeKey, select.value);
+      renderRows();
+      log(`FPS per-take: ${shortGroupLabel(takeKey)} → ${select.value}`);
+    });
+
+    els.fpsOverrideList.addEventListener("click", event => {
+      const button = event.target.closest?.("[data-fps-clear]");
+      if (!button) return;
+      takeFps.clearOverride(button.dataset.fpsClear);
+      renderRows();
+      log(`FPS per-take: 清除 ${shortGroupLabel(button.dataset.fpsClear)} 的覆盖`);
+    });
+
+    els.exportDirectoryBtn.addEventListener("click", () => guarded(async () => {
+      const picked = await outputDirectory.pick({ remember: els.exportRememberDirectoryInput.checked });
+      await renderDirectoryLabel();
+      if (picked.cancelled) return;
+      if (!picked.handle) throw new Error("无法使用这个输出文件夹。请在其中新建并选择一个子文件夹（例如 Downloads/AudioTCChange_Poly）后重试。");
+      log(`Output directory: ${picked.handle.name}${picked.remembered ? " (remembered)" : " (not remembered)"}`);
+      els.statusLine.textContent = `输出目录：${picked.handle.name}`;
+      showToast(`✅ 输出目录：${picked.handle.name}`);
+    }));
+
+    els.backupBeforeWriteInput.addEventListener("change", () => {
+      renderBackupNotice();
+      log(els.backupBeforeWriteInput.checked
+        ? "Backup ON: 每份 .bak 与源文件等大，磁盘要留出余量，且不会被自动清理。"
+        : "Backup OFF: 撤销只能回写元数据，无法恢复被静音的 LTC 音频。");
+    });
 
     els.fpsInput.addEventListener("change", () => {
       normalizeTimecodeInput(els.offsetInput);
@@ -955,11 +1660,15 @@
       setState,
       log,
       guarded,
+      takeFps,
     });
 
     calculator.refreshCalculator();
     setupPwa({ installBtn: els.installBtn, log });
     fileImport.setupDragAndDrop();
+    refreshExportOptions([]);
+    renderDirectoryLabel();
+    outputDirectory.load().then(renderDirectoryLabel, () => {});
   </script>
 </body>
 </html>

@@ -5,8 +5,15 @@ import {
   ixmlRateToFpsValue,
   parseFps,
 } from "./timecode.js";
+import {
+  GLOBAL_FPS_SOURCE_LABEL,
+  TAKE_FPS_SOURCE_LABEL,
+  recordFileMetadataFpsValue,
+} from "./take-fps.js";
 
-export function createFpsMetadataController({ fpsInput }) {
+// takeFps 是可选注入的 per-take 覆盖 store（见 src/take-fps.js）。
+// 不注入时下面所有解析逻辑与改动前完全一致：只有"全局界面设置"一个来源。
+export function createFpsMetadataController({ fpsInput, takeFps = null }) {
   function fpsSelectLabel(value) {
     const option = Array.from(fpsInput.options).find(item => item.value === value);
     return option ? `${option.textContent} FPS` : fpsLabel(parseFps(value));
@@ -21,7 +28,12 @@ export function createFpsMetadataController({ fpsInput }) {
   }
 
   function fileMetadataFpsValue(record) {
-    return ixmlRateToFpsValue(record.ixmlInfo) || bextAspeedToFpsValue(record.bextInfo) || "";
+    return recordFileMetadataFpsValue(record);
+  }
+
+  /** 该 record 所属 take 是否有 per-take 覆盖；有则返回覆盖值，否则 ""。 */
+  function takeFpsOverrideValue(record) {
+    return takeFps?.overrideValueForRecord?.(record) || "";
   }
 
   function detectedMetadataFps(recordsToCheck) {
@@ -42,7 +54,7 @@ export function createFpsMetadataController({ fpsInput }) {
   }
 
   function recordFpsValue(record) {
-    return fileMetadataFpsValue(record) || metaFpsValue(record) || fpsInput.value;
+    return takeFpsOverrideValue(record) || fileMetadataFpsValue(record) || metaFpsValue(record) || fpsInput.value;
   }
 
   function recordFps(record) {
@@ -50,11 +62,19 @@ export function createFpsMetadataController({ fpsInput }) {
   }
 
   function recordFpsSource(record) {
+    if (takeFpsOverrideValue(record)) return TAKE_FPS_SOURCE_LABEL;
     if (ixmlRateToFpsValue(record.ixmlInfo)) return "iXML";
     if (bextAspeedToFpsValue(record.bextInfo)) return "bext aSPEED";
     if (importedMetadataFpsValue(record)) return "ALE/CSV";
     if (record._video?.fpsValue) return "视频元数据";
-    return "界面设置";
+    return GLOBAL_FPS_SOURCE_LABEL;
+  }
+
+  // 机器可读的来源分类，供 UI 做徽章/样式映射（对应"全局选择 / 文件元数据 / per-take 覆盖"三类）。
+  function recordFpsSourceKind(record) {
+    if (takeFpsOverrideValue(record)) return "override";
+    if (fileMetadataFpsValue(record) || importedMetadataFpsValue(record) || record._video?.fpsValue) return "metadata";
+    return "ui";
   }
 
   function recordFpsDisplay(record) {
@@ -73,11 +93,14 @@ export function createFpsMetadataController({ fpsInput }) {
   return {
     detectedMetadataFps,
     differsFromUi,
+    fileMetadataFpsValue,
     fpsSelectLabel,
     recordFps,
     recordFpsDisplay,
     recordFpsSource,
+    recordFpsSourceKind,
     recordFpsValue,
     setFpsValue,
+    takeFpsOverrideValue,
   };
 }

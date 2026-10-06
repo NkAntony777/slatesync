@@ -1,7 +1,8 @@
-const CACHE_NAME = "ltc-slate-helper-v1.5.0";
+const CACHE_NAME = "ltc-slate-helper-v1.6.0";
 const APP_ASSETS = [
   "./",
   "./index.html",
+  "./src/acceptance-checklist.js",
   "./src/app-version.js",
   "./src/sync-workflow.js",
   "./src/poly-export-profiles.js",
@@ -28,6 +29,8 @@ const APP_ASSETS = [
   "./src/preview-table.js",
   "./src/pwa.js",
   "./src/style.css",
+  "./src/take-fps.js",
+  "./src/take-health.js",
   "./src/timecode.js",
   "./src/timecode-input.js",
   "./src/time-reference-write-controller.js",

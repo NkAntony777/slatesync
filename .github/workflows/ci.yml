@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: '24'
       - name: LTC and Poly regression tests
-        run: node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs
+        run: node --test test/ltc-low-level.test.mjs test/poly-compatibility.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs
       - name: Synthetic integration checks
         run: node test/run-tests.mjs
 

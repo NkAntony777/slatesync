@@ -128,5 +128,8 @@ export function combineEligibleGroupsFor(recordList, takeGroupKeys) {
   return Array.from(recordsByGroupFor(recordList, takeGroupKeys).entries())
     .filter(([, groupRecords]) => groupRecords.length > 1 && groupRecords.every(record => isTakeTrackFor(record, takeGroupKeys)))
     .filter(([, groupRecords]) => hasExactSameDuration(groupRecords))
+    // 这一行恒真：channels > 1 || channels === 1 等价于「存在通道数 >= 1 的分轨」，
+    // 对任何非空分组都成立，因此它不做任何过滤。保留是为不改动既有分组语义，
+    // 但**不要**把它当成通道数校验——合板前的真实一致性检查见 src/take-health.js。
     .filter(([, groupRecords]) => groupRecords.some(record => record.channels > 1) || groupRecords.some(record => record.channels === 1));
 }

@@ -1,4 +1,22 @@
 import { polyExportProfile } from "./poly-export-profiles.js";
+import { renderAcceptanceChecklistText } from "./acceptance-checklist.js";
+
+// 合板说明 sidecar 的最终文本。
+//
+// 既有正文（syncWorkflowText）+ 交付验收清单（acceptance-checklist.js）用 "\r\n" 连接：
+// 两个模块各自 join("\r\n")，所以这里必须显式补一个分隔，不能靠数组 join。
+// 验收清单不是可选装饰——它把 docs/声音合板指南.md 的交付检查清单变成可勾选的东西，
+// 工具只判定文件层事实，"目标软件里还要做什么" 全靠它。
+//
+// BOM：调用方负责在整篇文本最前面放 \uFEFF（记事本读 UTF-8 中文需要）。
+// 这里不给清单再加一次，否则文件中段会出现一个 U+FEFF 字符。
+export function syncGuideText(result, options = {}) {
+  const base = syncWorkflowText(result, options);
+  const checklist = options.checklist || null;
+  if (!checklist) return base;
+  const text = renderAcceptanceChecklistText(checklist);
+  return text ? `${base}\r\n${text}` : base;
+}
 
 export function syncWorkflowText(result, options = {}) {
   const profile = polyExportProfile(result.profile || options.profile || "resolve");

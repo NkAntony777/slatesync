@@ -27,6 +27,9 @@ export function createLtcController({
   groupLabel,
   fpsSelectLabel,
   setFpsValue,
+  // 可选：per-take 覆盖 store（src/take-fps.js）。不注入时全部回落到 els.fpsInput.value，
+  // 与改动前完全一致。
+  takeFps = null,
   samplesToTimecode,
   defaultDisplayFps,
   confirmLtcFpsMismatch,
@@ -40,12 +43,47 @@ export function createLtcController({
     ? new WorkerPool(LTC_WORKER_CODE, Math.max(2, Math.min((navigator.hardwareConcurrency || 4) - 1, 6)))
     : null;
 
+  function globalFpsValue() {
+    return els.fpsInput.value;
+  }
+
+  /** 解码候选帧率：下拉框全部选项 + 该 take 的帧率值（保证覆盖值一定被尝试）。 */
+  function candidateFpsValuesForFpsValue(fpsValue) {
+    const values = Array.from(els.fpsInput.options).map(option => option.value);
+    if (fpsValue && !values.includes(fpsValue)) values.unshift(fpsValue);
+    return values;
+  }
+
   const decoder = createLtcDecoder({
     readDataView,
-    candidateFpsValues: () => Array.from(els.fpsInput.options).map(option => option.value),
-    defaultFpsValue: () => els.fpsInput.value,
+    // 解码器按无参调用这两个回调；带 take 提示时返回该 take 的值，否则就是全局值。
+    candidateFpsValues: takeHint => candidateFpsValuesForFpsValue(takeHint?.fpsValue || ""),
+    defaultFpsValue: takeHint => resolveTakeFpsValue(takeHint) || globalFpsValue(),
     fpsSelectLabel,
   });
+
+  /**
+   * 某个 take 实际该用的帧率值：per-take 覆盖 > 全局界面选择。
+   * takeHint 可以是 takeKey，也可以是 { takeKey, fpsValue }。
+   */
+  function resolveTakeFpsValue(takeHint) {
+    const takeKey = typeof takeHint === "string" ? takeHint : takeHint?.takeKey;
+    const explicit = typeof takeHint === "string" ? "" : takeHint?.fpsValue || "";
+    if (explicit) return explicit;
+    if (!takeKey) return globalFpsValue();
+    return takeFps?.resolveFpsValueForTake?.(takeKey, globalFpsValue()) || globalFpsValue();
+  }
+
+  /** 单个 take 的解码候选帧率（per-take 覆盖排在最前）。 */
+  function takeCandidateFpsValues(takeKey) {
+    return candidateFpsValuesForFpsValue(resolveTakeFpsValue(takeKey));
+  }
+
+  /** 单个 take 的帧率：给 detectLtcForTake 用的 (fps, fpsValue) 二元组。 */
+  function takeFpsPair(takeKey) {
+    const fpsValue = resolveTakeFpsValue(takeKey);
+    return { fps: parseFps(fpsValue), fpsValue };
+  }
 
   function ltcStartTimecode(result, record) {
     if (result?.newTimeReference == null || !record) return result?.timecode || "";
@@ -93,10 +131,10 @@ export function createLtcController({
     const maxSamples = Number(record.durationSamples < sampleLimit ? record.durationSamples : sampleLimit);
     const bytesToRead = Math.min(record.dataSize, maxSamples * record.blockAlign);
     const buffer = await record.file.slice(record.dataOffset, record.dataOffset + bytesToRead).arrayBuffer();
-    const preferredValue = fps.value || els.fpsInput.value;
+    const preferredValue = fps.value || globalFpsValue();
     const values = [
       preferredValue,
-      ...decoder.candidateFpsValues().filter(value => value !== preferredValue),
+      ...decoder.candidateFpsValues({ fpsValue: preferredValue }).filter(value => value !== preferredValue),
     ];
     const result = await ltcWorkerPool.run({
       buffer,
@@ -324,7 +362,7 @@ export function createLtcController({
     const selectedKeys = options.selectedRecordKeys;
     const records = getRecords();
     if (!records.length) throw new Error("请先拖入 WAV 或视频文件");
-    let fpsValue = els.fpsInput.value;
+    let fpsValue = globalFpsValue();
     let allowFpsPrompt = true;
     const allowSoftSync = options.allowSoftSync === true;
 
@@ -354,7 +392,8 @@ export function createLtcController({
           updateWriteProgress("正在确认 LTC 帧率…", shortGroupLabel(groups[0]?.[0] || "根目录"), 0, groups.length);
           for (let i = 0; i < groups.length; i++) {
             const [takeKey, groupRecords] = groups[i];
-            const probe = await detectLtcForTake(takeKey, groupRecords, fps, fpsValue, allowFpsPrompt, { allowSoftSync: false });
+            const take = takeFpsPair(takeKey);
+            const probe = await detectLtcForTake(takeKey, groupRecords, take.fps, take.fpsValue, allowFpsPrompt, { allowSoftSync: false });
             if (probe.fpsMismatch) {
               els.progressOverlay.classList.remove("show");
               const useAuto = await confirmLtcFpsMismatch({
@@ -388,10 +427,12 @@ export function createLtcController({
         for (let i = 0; i < groups.length; i += takeConcurrency) {
           const batch = groups.slice(i, i + takeConcurrency);
           updateWriteProgress("正在检测 LTC…", shortGroupLabel(batch[0]?.[0] || "根目录"), i, groups.length);
-          const batchResults = await Promise.all(batch.map(([takeKey, groupRecords]) =>
-            preflightResults.get(takeKey) ||
-            detectLtcForTake(takeKey, groupRecords, fps, fpsValue, allowFpsPrompt, { allowSoftSync })
-          ));
+          const batchResults = await Promise.all(batch.map(([takeKey, groupRecords]) => {
+            const cached = preflightResults.get(takeKey);
+            if (cached) return cached;
+            const take = takeFpsPair(takeKey);
+            return detectLtcForTake(takeKey, groupRecords, take.fps, take.fpsValue, allowFpsPrompt, { allowSoftSync });
+          }));
 
           const mismatch = batchResults.find(result => result.fpsMismatch);
           if (mismatch && allowFpsPrompt) {
@@ -490,5 +531,7 @@ export function createLtcController({
     extractLtcFromFiles,
     ltcStartTimecode,
     ltcStatusText,
+    resolveTakeFpsValue,
+    takeCandidateFpsValues,
   };
 }

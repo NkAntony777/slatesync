@@ -5,6 +5,28 @@ import {
   shortGroupLabel,
 } from "./grouping.js";
 import { fpsActionLabel } from "./wave-fps-metadata.js";
+// 来源标签从 take-fps.js 取常量而不是抄一遍字符串：抄一遍迟早会和 store 里的真值对不上，
+// 而对不上时的表现是"覆盖生效了但界面看不出来"——最难查的那种。
+import { GLOBAL_FPS_SOURCE_LABEL, TAKE_FPS_SOURCE_LABEL } from "./take-fps.js";
+
+/**
+ * fps 徽章的 class。
+ *
+ * 帧率有三种来源，必须一眼分得出来（这是 recordFpsSourceKind 的三态）：
+ *   per-take 覆盖 → take-override（红，最需要被看见）
+ *   文件元数据     → ixml / video（既有绿、紫）
+ *   界面全局设置   → ui（中性灰，与其他所有来源明确区分）
+ * LTC 检测与 FPS 预览是另外两条路径的来源标记，沿用既有配色。
+ */
+export function fpsBadgeClass(source) {
+  if (source === TAKE_FPS_SOURCE_LABEL) return "fps-badge take-override";
+  if (source === "iXML" || source === "ALE/CSV" || source === "bext aSPEED") return "fps-badge ixml";
+  if (source === "LTC检测") return "fps-badge ltc";
+  if (source === "视频元数据") return "fps-badge video";
+  if (source === "FPS预览") return "fps-badge preview";
+  if (source === GLOBAL_FPS_SOURCE_LABEL) return "fps-badge ui";
+  return "fps-badge";
+}
 
 export function createPreviewTableRenderer({
   els,
@@ -40,14 +62,6 @@ export function createPreviewTableRenderer({
       source: "LTC检测",
       display: `${ltc.fpsLabel || ltc.fpsValue || "LTC"} · LTC检测`,
     };
-  }
-
-  function fpsBadgeClass(source) {
-    if (source === "iXML" || source === "ALE/CSV") return "fps-badge ixml";
-    if (source === "LTC检测") return "fps-badge ltc";
-    if (source === "视频元数据") return "fps-badge video";
-    if (source === "FPS预览") return "fps-badge preview";
-    return "fps-badge";
   }
 
   function ltcValueClass(ltc) {
