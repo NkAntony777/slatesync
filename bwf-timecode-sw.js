@@ -1,4 +1,4 @@
-const CACHE_NAME = "ltc-slate-helper-v1.6.0";
+const CACHE_NAME = "ltc-slate-helper-v1.7.0";
 const APP_ASSETS = [
   "./",
   "./index.html",

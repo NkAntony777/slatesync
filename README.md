@@ -98,7 +98,7 @@ npm install          # 仅构建需要 esbuild；打包产物本身无运行时�
 npm run build:single -- --repo https://github.com/NkAntony777/slatesync
 ```
 
-产物位于 `dist/bwf-timecode-singlefile-v1.6.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
+产物位于 `dist/bwf-timecode-singlefile-v1.7.0.html`。`dist/` 已在 `.gitignore` 中，构建产物不进入源码仓库，通过 GitHub Release 分发；`--repo` 参数用于在页脚写入来源仓库地址。
 
 单文件版**保留完整功能**，包括写回时码和合并 Poly：`file://` 在 Chrome / Edge 属于 secure context，File System Access API（`showSaveFilePicker` / `showDirectoryPicker`）可用，因此不需要为降级功能改代码。
 
@@ -115,7 +115,7 @@ npm run build:single -- --repo https://github.com/NkAntony777/slatesync
 | 检查项 | 结果 |
 |---|---|
 | 内联 module 启动、整页零外部请求 | 通过 |
-| 版本号来自内联 shim | 通过（`v1.6.0`） |
+| 版本号来自内联 shim | 通过（`v1.7.0`） |
 | File System Access API 可用 | 通过（不降级） |
 | 拖入演示素材、take 分组 | 通过 |
 | Blob URL Worker 解码 LTC 并回填 | 通过（`01:23:45:19`） |
@@ -195,6 +195,17 @@ PCM24 方案不会重采样。Float 超过 0 dBFS 转定点可能削波，导出
 - 不要同时把同一 take 的主 Poly、原始分轨和 SyncRef 当成不同录音合板；也不要无意叠加 LR mix 与全部 ISO。
 
 详细说明：[中文声音合板指南](docs/声音合板指南.md)。
+
+## v1.7.0：提高合板率
+
+前几轮把 LTC 解码推到了边际收益极低的位置，用户实际卡住的地方一直是**合板率**——素材明明是一套能合的分轨，工具却合不出来。这版处理的就是这三道闸门。
+
+1. **take 分组只认 Zoom 命名。** 此前只有 `_Tr1` / `_CH2` / `_LR` 能分组，Sound Devices MixPre-3 一类的 `S01T01_1`、`Boom_1`、`XLR1`、`TAKE01_A001` 与单侧 `Mix_L` + `Mix_R` 全部落空，合板率恒为 0。新增通用规则，并要求元数据佐证（单声道、采样率位深一致、序号不重复、时码全同或时长 1% 以内）才成组；take 序列（`TAKE01`/`TAKE02`）、多声道 Poly、日期尾巴、序号冲突一律不合并。
+2. **时长不一致直接劝退。** 新增对齐与纠错：GCC-PHAT 测采样级时延（顺带判极性反接），首尾两测估算时钟漂移比，据此补静音、丢 pre-roll、线性重采样。界面是导出配置里的勾选 + 基准轨下拉，**默认关闭**，关闭时输出逐字节不变。尾部裁切只报告不执行——裁掉的是真实录音。
+3. **批量里一个坏 take 带走全部。** 时码准备、预校验、写入三个阶段改为各自 take 级成败，结束时汇报「成功 N 个 / 失败 M 个」并把完整清单写进日志。同名 Poly 冲突仍整批阻断：宁可全不写也不静默覆盖。
+4. **合板率是个黑箱。** 导入后状态栏直接给出「识别到 N 个分轨 take（可合 X 个，时长不一致 Y 个）」，不用逐个翻体检面板才知道这批能不能合。
+
+对齐修复**尚未在真实拍摄素材上验证过**，先用几段真实 ISO 素材勾一次确认补静音与重采样的结果符合预期。
 
 ## v1.6.0：合板体验优先
 
