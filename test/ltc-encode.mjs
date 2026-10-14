@@ -21,6 +21,19 @@ export function ltcFrameBits({ hh, mm, ss, ff, drop = false }) {
   return bits;
 }
 
+// SMPTE ST 12-1：校验位（25 fps 为 bit 27，其余帧率为 bit 59）使整个 80 位帧
+// （含两个 16 位同步字）在 25 fps 下为偶校验、其余帧率为奇校验。两个校验位
+// 位置在所有帧率下都是未用标志位，置位不影响 BCD。docs/LTC识别强化方案.md
+// §6.4：测试编码器必须先合规置位，校验才能作为解码的辅助判据，否则自检信号
+// 会被自己的校验误杀。
+export function applyLtcParity(bits, nominal) {
+  const parityBit = nominal === 25 ? 27 : 59;
+  let ones = 0;
+  for (let i = 0; i < 80; i++) if (bits[i] && i !== parityBit) ones++;
+  bits[parityBit] = ones % 2 === (nominal === 25 ? 0 : 1) ? 0 : 1;
+  return bits;
+}
+
 export function parseTc(text) {
   const [hh, mm, ss, ff] = text.split(/[:;]/).map(Number);
   return { hh, mm, ss, ff };
@@ -62,7 +75,7 @@ export function encodeLtcAudio({
 
   while (pos < totalSamples) {
     frameStarts.set(`${tc.hh}:${tc.mm}:${tc.ss}:${tc.ff}`, pos);
-    const bits = ltcFrameBits(tc);
+    const bits = applyLtcParity(ltcFrameBits(tc), nominal);
     for (let b = 0; b < 80; b++) {
       const cellStart = pos + b * bitSamples;
       const mid = cellStart + bitSamples / 2;

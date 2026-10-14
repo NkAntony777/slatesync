@@ -51,6 +51,20 @@ function buildRollingSyncKeys(bits) {
   return keys;
 }
 
+// SMPTE ST 12-1 parity: bit 27 (25 fps) / bit 59 (other rates) is set so the
+// whole 80-bit frame, sync words included, has EVEN parity at 25 fps and ODD
+// parity at every other rate. The test encoder (test/ltc-encode.mjs) sets the
+// bit over the same 80-bit window, so encoder-produced frames pass. A frame
+// reversal does not change the bit count, so the check is polarity-agnostic.
+// Returns null when fewer than 80 bits are available (unknown, not a failure).
+export function ltcFrameParityOk(bits, fps) {
+  if (!bits || bits.length < 80) return null;
+  const is25 = Number(fps.nominal) === 25;
+  let ones = 0;
+  for (let i = 0; i < 80; i++) if (bits[i]) ones++;
+  return is25 ? ones % 2 === 0 : ones % 2 === 1;
+}
+
 // Frame starts are only worth expanding where the sync word actually lands:
 // bits 64..80 for forward frames, bits 0..16 for reverse frames. The key set is
 // closed under bit reversal, so one membership test covers both polarities.
@@ -793,22 +807,58 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
       sampleStart: decoded.bitStarts[start],
       sampleEnd: decoded.bitEnds[start + 79],
       reverse,
+      parityOk: ltcFrameParityOk(candidateBits, fps),
     };
   },
 
+  // 连续帧扫描。缺陷帧桥接：某格解析失败时不直接掐断，向前最多再看
+  // T.bridgeMaxFrames 个位置；落点帧必须解析干净且时码 == 上一帧 + k（绝对
+  // 帧号由 timecodeToFrames 换算，DF 跳帧标签天然正确），才跨过这段坏帧。
+  // 桥接帧不计入 lockedFrames（frames 数组只放真实解析帧），数量记在
+  // bridgedFrames 上交由上层扣置信度、压 definitive。错锁纪律：只有端点
+  // 完全干净且递增精确的 run 才允许被桥接延申；落点不符立即断 run。
   consecutiveRun(decoded, start, fps, reverse = false, strictDrop = true) {
     const frames = [];
+    let bridgedFrames = 0;
     for (let offset = 0; offset < 12; offset++) {
-      const bitStart = start + offset * 80;
-      const frame = this.frameAt(decoded, bitStart, fps, reverse, strictDrop);
-      if (!frame) break;
+      let frame = this.frameAt(decoded, start + offset * 80, fps, reverse, strictDrop);
+      if (!frame) {
+        if (!frames.length) break;
+        // 桥接段校验：坏帧有 80 位数据但同步/BCD 不过，且 ST 12-1 校验位也
+        // 错——这是彻底损坏而非"校验位偷懒的合法帧"。禁止桥接跨越这样的
+        // 格子（它只可能把 run 拉进乱码区），本 run 到此为止，外层扫描
+        // 继续从后面的同步锚点开始。
+        if (ltcFrameParityOk(decoded.bits.slice(start + offset * 80, start + offset * 80 + 80), fps) === false) break;
+        const previous = frames[frames.length - 1];
+        let bridged = 0;
+        for (let k = 2; k <= T.bridgeMaxFrames + 1; k++) {
+          const landingStart = start + (offset - 1 + k) * 80;
+          if (landingStart + 80 > decoded.bits.length) break;
+          const landing = this.frameAt(decoded, landingStart, fps, reverse, strictDrop);
+          if (!landing) {
+            // 桥接路径上的中间格同样适用上面的校验：彻底坏帧禁止跨越。
+            if (ltcFrameParityOk(decoded.bits.slice(landingStart, landingStart + 80), fps) === false) break;
+            continue;
+          }
+          const expected = reverse ? previous.frames - BigInt(k) : previous.frames + BigInt(k);
+          if (landing.frames !== expected) break;
+          bridged = k - 1;
+          frame = landing;
+          break;
+        }
+        if (!bridged) break;
+        bridgedFrames += bridged;
+        offset += bridged;
+        frames.push(frame);
+        continue;
+      }
       if (frames.length) {
         const expected = reverse ? frames[frames.length - 1].frames - 1n : frames[frames.length - 1].frames + 1n;
         if (frame.frames !== expected) break;
       }
       frames.push(frame);
     }
-    return frames;
+    return { frames, bridgedFrames };
   },
 
   qualityFor(candidate) {
@@ -831,12 +881,19 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
   },
 
   isDefinitiveCandidate(candidate) {
-    return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= T.halfBitError.definitive;
+    // 桥接延申过的 run 端点之间隔着未解析帧，证据强度低于逐帧连续锁定，
+    // 不允许走"无需确认的 definitive"通道（错锁纪律：宁可慢一步确认）。
+    return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= T.halfBitError.definitive && !(candidate.bridgedFrames > 0);
   },
 
   compareResults(a, b) {
     if ((b.qualityRank || 0) !== (a.qualityRank || 0)) return (b.qualityRank || 0) - (a.qualityRank || 0);
-    if (Math.abs((a.halfBitError || 1) - (b.halfBitError || 1)) > T.halfBitError.definitive) return (a.halfBitError || 1) - (b.halfBitError || 1);
+    // 只有缺失/非有限值才按最坏误差处理；恰好为 0 的误差是完美时钟，不能
+    // 因 falsy 被当成 1.0（桥接 run 的跨度测量经常得到精确的 0）。
+    const halfBitErrorOf = value => Number.isFinite(value) ? value : 1;
+    if (Math.abs(halfBitErrorOf(a.halfBitError) - halfBitErrorOf(b.halfBitError)) > T.halfBitError.definitive) {
+      return halfBitErrorOf(a.halfBitError) - halfBitErrorOf(b.halfBitError);
+    }
     if ((b.lockedFrames || 0) !== (a.lockedFrames || 0)) return (b.lockedFrames || 0) - (a.lockedFrames || 0);
     if ((b.confidence || 0) !== (a.confidence || 0)) return (b.confidence || 0) - (a.confidence || 0);
     if (Boolean(a.reverse) !== Boolean(b.reverse)) return Number(a.reverse) - Number(b.reverse);
@@ -848,7 +905,7 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
     let best = null;
     for (const start of syncAnchoredStarts(decoded.bits)) {
       for (const reverse of [false, true]) {
-        const run = this.consecutiveRun(decoded, start, fps, reverse, strictDrop);
+        const { frames: run, bridgedFrames } = this.consecutiveRun(decoded, start, fps, reverse, strictDrop);
         if (run.length < 2) continue;
         const first = run[0];
         const last = run[run.length - 1];
@@ -864,14 +921,24 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           : rawSampleOffset;
         const tcSamples = framesToSamples(first.frames, record.sampleRate, fps);
         const newTimeReference = normalizeTimeReference(tcSamples - BigInt(sampleOffset), record.sampleRate);
-        const measuredHalfBitSamples = (last.sampleEnd - first.sampleStart) / Math.max(1, run.length * 80 * 2);
+        // 跨度按 bitStart 网格算（含桥接跳过的格子）：桥接 run 的采样跨度
+        // 覆盖坏帧，若只按真实帧数除会把 measuredHalfBit 算小、halfBitError
+        // 虚高。无桥接时 spanBits == run.length*80，与旧行为完全一致。
+        const spanBits = (last.bitStart - first.bitStart) + 80;
+        const measuredHalfBitSamples = (last.sampleEnd - first.sampleStart) / Math.max(1, spanBits * 2);
         const halfBitError = Math.abs(measuredHalfBitSamples - expectedHalfBitSamples) / expectedHalfBitSamples;
+        // 帧率网格否决：偏差超过 lockCeiling 说明候选 fps 本身就是错的，读出
+        // 的时码毫无价值（错锁纪律：宁可不锁，不给错数）。
+        if (halfBitError > T.halfBitError.lockCeiling) continue;
         const rejectRatio = decoded.rejected / Math.max(1, decoded.rejected + decoded.bits.length);
+        const parityFailures = run.reduce((sum, frame) => sum + (frame.parityOk === false ? 1 : 0), 0);
         const lockScore = Math.min(1, run.length / 8);
         const halfScore = Math.max(0, Math.min(1, 1 - halfBitError / T.halfBitError.halfScoreSpan));
         const consistencyScore = Math.max(0, Math.min(1, 1 - (decoded.observedJitter || 0) / 0.18));
         const edgeScore = Math.min(1, decoded.bits.length / 320);
         const levelScore = Math.min(1, stats.p2p / 0.6);
+        // 桥接帧与校验位失败都只是软证据折扣，不做硬拒绝（校验位在真实编码器
+        // 上常有疏漏；桥接端点已保证时码精确自洽）。
         const confidence = Math.max(0, Math.min(1,
           lockScore * 0.3 +
           halfScore * 0.3 +
@@ -879,7 +946,9 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           edgeScore * 0.12 +
           levelScore * 0.12 -
           rejectRatio * 0.18 +
-          0.04
+          0.04 -
+          bridgedFrames * T.bridgeConfidencePenalty -
+          parityFailures * T.parityConfidencePenalty
         ));
         const candidate = {
           ...first,
@@ -887,6 +956,8 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
           newTimeReference,
           confidence,
           lockedFrames: run.length,
+          bridgedFrames,
+          parityFailures,
           reverse,
           measuredHalfBitSamples,
           halfBitError,
@@ -908,6 +979,8 @@ export function createLtcDecoder({ readDataView, candidateFpsValues, defaultFpsV
             measuredHalfBitSamples,
             halfBitError,
             rejectRatio,
+            bridgedFrames,
+            parityFailures,
             driftRatio,
             driftPpm: Math.round((driftRatio - 1) * 1e6),
             windowStart: stats.windowStart || 0,

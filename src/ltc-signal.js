@@ -24,7 +24,14 @@ export const LTC_TUNING = {
   minHalfScale: 0.45,
   maxHalfScale: 2.4,
   // Half-bit error gates.
-  halfBitError: { definitive: 0.00025, high: 0.0025, medium: 0.008, halfScoreSpan: 0.006 },
+  halfBitError: {
+    definitive: 0.00025, high: 0.0025, medium: 0.008, halfScoreSpan: 0.006,
+    // 帧率网格本身的否决线：实测半比特与标称偏差超过 ~1% 就不是时钟漂移，
+    // 而是候选 fps 选错了（与 DRIFT.max 同一语义）。这种候选读出的时码是
+    // 按错误网格编造的 Fiction（错锁），直接拒绝，宁可不锁。真实素材在正确
+    // 帧率下无论多弱，测量值都贴近标称；实测的变速场景都在千分级。
+    lockCeiling: 0.01,
+  },
   // Quality tiers.
   quality: {
     highRank: 3, mediumRank: 2, lowRank: 1,
@@ -45,6 +52,19 @@ export const LTC_TUNING = {
     digitErrorsMax: 5,
     maxRunFrames: 6,
   },
+  // Corrupt-frame bridging in the hard edge path. When the frame at run offset
+  // +1 fails to parse, look ahead up to bridgeMaxFrames further positions; a
+  // landing frame whose timecode equals prev + k (absolute frame counts, which
+  // is exactly drop-frame-aware) lets the run step over the corrupt gap. Each
+  // bridged frame costs confidence and caps the candidate below "definitive".
+  bridgeMaxFrames: 2,
+  bridgeConfidencePenalty: 0.05,
+  // SMPTE ST 12-1 parity (bit 27 @ 25 fps, bit 59 otherwise; whole 80-bit frame
+  // incl. sync words; even @ 25 fps, odd elsewhere). Soft signal only: real
+  // encoders sometimes leave it unset, so it never hard-rejects — it only
+  // nudges confidence down, and a parity failure inside a would-be bridged gap
+  // vetoes that position as a landing.
+  parityConfidencePenalty: 0.01,
   // Analysis-only normalisation.
   analysis: { rmsFloor: 1e-6, p2pFloor: 2e-6, gainCap: 8192, gainTargetPeak: 0.35, conditioningGainCap: 80 },
 };

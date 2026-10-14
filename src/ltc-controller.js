@@ -16,6 +16,16 @@ import {
 } from "./ltc-worker.js";
 import { createLtcDecoder } from "./ltc-decoder.js";
 
+// 判定一次失败的记录是否值得自动兜底重试。只有"扫过但锁不住"的失败才有救：
+// silent（接近静音）说明声道里没有信号能量，增强识别也无米下锅；scan-error
+// 是文件/读取问题，重试同样无意义。保持纯函数，脱离 Worker 也可单测。
+export function shouldAutoSoftRetry(report, detectError = null) {
+  if (detectError) return false;
+  if (!report?.length) return false;
+  const failure = ltcFailureSummary(report);
+  return failure.code !== "silent" && failure.code !== "scan-error";
+}
+
 export function createLtcController({
   els,
   getRecords,
@@ -353,6 +363,42 @@ export function createLtcController({
         detectError,
         report,
       };
+    }
+
+    // 字段反馈核心诉求：受损/微弱时间码不该要求用户去点隐藏的兜底按钮。
+    // 常规扫描全部失败后，对"扫过但没锁住"的记录自动追加一次增强识别——
+    // 与手动按钮完全同一条代码路径（detectLtcFull 带 allowSoftSync），软候选
+    // 自带 requiresConfirmation 与质量封顶，确认流程 UI 已支持。已锁定的记录
+    // 绝不重扫；silent/scan-error 失败直接跳过；显式兜底模式下常规扫描已含
+    // 软路径，不必再来一遍。速度较慢，逐条串行并给出进度提示。
+    if (options.allowSoftSync !== true) {
+      const failedRecords = scanRecords.filter(record =>
+        report.some(entry => entry.record === record) &&
+        !report.some(entry => entry.record === record && entry.best));
+      for (let i = 0; i < failedRecords.length; i++) {
+        const record = failedRecords[i];
+        const recordReport = report.filter(entry => entry.record === record);
+        const recordError = recordReport.find(entry => entry.error)?.error || null;
+        if (!shouldAutoSoftRetry(recordReport, recordError)) continue;
+        log(`LTC 增强识别: ${record.name} 常规扫描未锁定，自动启用兜底模式重试（速度较慢）…`);
+        updateWriteProgress("正在增强识别 LTC（速度较慢）…", record.name, i, failedRecords.length);
+        try {
+          const attempt = {
+            record,
+            auto: ltcWorkerPool
+              ? await detectLtcFull(record, fps, { allowSoftSync: true })
+              : await detectLtcAuto(record, fps, { allowSoftSync: true }),
+            error: null,
+          };
+          report.push(summarizeAttempt(record, attempt.auto, null, "soft-auto"));
+          const retry = bestTakeAttempt([attempt], fpsValue, false);
+          if (retry.detected) {
+            return { takeKey, groupRecords, detected: { ...retry.detected, groupKey: takeKey }, detectError, report };
+          }
+        } catch (error) {
+          report.push(summarizeAttempt(record, null, error, "soft-auto"));
+        }
+      }
     }
 
     return { takeKey, groupRecords, detected: null, detectError, report };

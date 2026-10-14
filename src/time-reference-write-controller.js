@@ -61,7 +61,20 @@ import {
 export const BACKUP_SUFFIX = ".bak";
 export const BACKUP_PENDING_SUFFIX = ".pending";
 
-const BACKUP_COPY_CHUNK = 8 * 1024 * 1024;
+// "另存为新文件"方案的输出命名：在扩展名前插入 _TCfix。
+//   ZOOM0001_Tr1.WAV -> ZOOM0001_Tr1_TCfix.WAV
+// 刻意避开 _Poly.WAV / _SyncRef.WAV / _channels.json 等工具产物后缀，
+// 且仍以 .WAV 结尾，能被导入器/Resolve 正常识别。
+export const SAVE_AS_SUFFIX = "_TCfix";
+
+export function saveAsNameFor(sourceName) {
+  const dot = sourceName.lastIndexOf(".");
+  const stem = dot > 0 ? sourceName.slice(0, dot) : sourceName;
+  const ext = dot > 0 ? sourceName.slice(dot) : "";
+  return `${stem}${SAVE_AS_SUFFIX}${ext}`;
+}
+
+const BACKUP_COPY_CHUNK = 32 * 1024 * 1024;
 
 export function backupNameFor(sourceName) {
   return `${sourceName}${BACKUP_SUFFIX}`;
@@ -165,8 +178,9 @@ async function tryGetFileHandle(directory, name) {
 /**
  * 分块复制。每次 await 都让出事件循环，所以几个 GB 的备份也不会把 UI 卡死到
  * 浏览器被杀。写完返回实际复制的字节数。
+ * 导出供"另存为新文件"方案复用（整文件字节复制是同一件事）。
  */
-async function copyFileInto(sourceFile, writable, onProgress) {
+export async function copyFileInto(sourceFile, writable, onProgress) {
   let copied = 0;
   while (copied < sourceFile.size) {
     const end = Math.min(copied + BACKUP_COPY_CHUNK, sourceFile.size);
@@ -176,6 +190,25 @@ async function copyFileInto(sourceFile, writable, onProgress) {
     await onProgress?.(copied, sourceFile.size);
   }
   return copied;
+}
+
+/**
+ * 受限并发跑批。worker(item, index) 并发至多 size 个；onProgress(done, total)
+ * 在每件完成后回调一次（进度按完成数，不按开始数）。
+ */
+async function runPool(items, size, worker, onProgress) {
+  let nextIndex = 0;
+  let done = 0;
+  async function runner() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      await worker(items[index], index);
+      done += 1;
+      await onProgress?.(done, items.length);
+    }
+  }
+  const width = Math.max(1, Math.min(size, items.length));
+  await Promise.all(Array.from({ length: width }, runner));
 }
 
 function backupFailureMessage(record, backupName, error) {
@@ -205,7 +238,12 @@ export function createTimeReferenceWriteController({
   getLtcResults,
   shouldMuteLtc,
   // 可选：() => boolean。默认开启（安全默认）。关掉后撤销退回到只回写元数据。
+  // UI 侧默认不勾选（不再自动备份，改为弹窗强制提醒用户自行备份）。
   shouldBackup,
+  // 可选：async (items) => Map<recordKey, {handle, name, parentHandle?}> | null。
+  // "另存为新文件"方案的目标句柄来源：单文件用 showSaveFilePicker，多个文件用
+  // showDirectoryPicker 批量命名。返回 null 表示用户取消。
+  pickSaveAsTargets,
   setChangedTimeReferences,
   refreshTakeGroups,
   offsetInput,
@@ -446,8 +484,8 @@ export function createTimeReferenceWriteController({
     log(`Preview OK: ${nextPreviews.length} files, per-file FPS from iXML where available, UI fallback ${fpsLabel(fallbackFps)}`);
   }
 
-  async function writeManifestToFolder() {
-    const directoryHandle = getDirectoryHandle();
+  async function writeManifestToFolder(directoryHandleOverride, previewsOverride) {
+    const directoryHandle = directoryHandleOverride || getDirectoryHandle();
     if (!directoryHandle) return null;
     const now = new Date();
     const stamp = [
@@ -461,7 +499,7 @@ export function createTimeReferenceWriteController({
     ].join("");
     const handle = await directoryHandle.getFileHandle(`timecode_fix_manifest_${stamp}.csv`, { create: true });
     const writable = await handle.createWritable();
-    await writable.write(new Blob([buildManifestCsv(getPreviews(), {
+    await writable.write(new Blob([buildManifestCsv(previewsOverride || getPreviews(), {
       fpsSelectLabel,
       recordFps,
       recordFpsSource,
@@ -475,6 +513,219 @@ export function createTimeReferenceWriteController({
 
   async function muteLtcChannel(record, channelIndex, writable, progressBase, progressTotal) {
     return muteLtcChannelAudio(record, channelIndex, writable, progressBase, progressTotal, updateWriteProgress);
+  }
+
+  // -------------------------------------------------------------------------
+  // 方案二 · 另存为新文件：整文件字节复制 → 在副本上写时码（+按需静音 LTC 轨）。
+  // 原文件从头到尾不打开 writable，物理上不可能被改动。
+  // -------------------------------------------------------------------------
+
+  async function copyRecordToNewFile(sourceRecord, target, onProgress) {
+    const sourceFile = await sourceRecord.fileHandle.getFile();
+    const writable = await target.handle.createWritable();
+    let copied = 0;
+    try {
+      copied = await copyFileInto(sourceFile, writable, onProgress);
+      await writable.close();
+    } catch (error) {
+      try { await writable.abort(); } catch { /* 流已损坏，尽力而为 */ }
+      throw new Error(`${sourceRecord.name}: 复制到新文件失败（${error?.message || error}），原文件未被修改`);
+    }
+    const writtenSize = (await target.handle.getFile()).size;
+    if (writtenSize !== sourceFile.size || copied !== sourceFile.size) {
+      throw new Error(`${sourceRecord.name}: 新文件字节数不符（期望 ${sourceFile.size}，实际 ${writtenSize}），原文件未被修改`);
+    }
+    // 字节一致，chunk 布局与源 scan 完全相同；挂上目标句柄当作新 record 视图用。
+    // file 字段由调用方按需自取（mute 路径会用到），这里不主动读一份大字节。
+    return {
+      ...sourceRecord,
+      fileHandle: target.handle,
+      name: target.name,
+      relativePath: target.name,
+      parentPath: "",
+      parentHandle: target.parentHandle || null,
+      file: null,
+    };
+  }
+
+  /**
+   * 把一个条目（record + 目标时码 + 可选静音）落到新文件里并校验。
+   * mute 为 null 表示这条不需要静音。
+   */
+  async function writeItemToNewFile(item, target, mute, progressBase, progressTotal) {
+    const view = await copyRecordToNewFile(item.record, target, (done, bytes) =>
+      updateWriteProgress("正在输出新文件…", `${item.record.name} → ${target.name}（复制 ${Math.round((done / Math.max(1, bytes)) * 100)}%）`, progressBase, progressTotal));
+    await writeTimeReference(view, item.value, null, { rescan: false });
+    let fresh = null;
+    if (mute) {
+      // 静音前必须重新扫：writeTimeReference 可能插入了 bext chunk，data 偏移会变。
+      fresh = await scanWave(target.handle);
+      const writable = await target.handle.createWritable({ keepExistingData: true });
+      try {
+        await muteLtcChannel(fresh, mute.channelIndex, writable, progressBase + 0.5, progressTotal);
+      } finally {
+        await writable.close();
+      }
+    }
+    fresh = fresh || await scanWave(target.handle);
+    if (fresh.oldTimeReference !== item.value) {
+      throw new Error(`${target.name}: 新文件写入校验失败`);
+    }
+    verifyIxmlTimeReference(fresh, item.value, target.name);
+    return view;
+  }
+
+  /**
+   * 向注入的 pickSaveAsTargets 要目标句柄。返回 null 表示用户取消选择。
+   */
+  async function resolveSaveAsTargets(items) {
+    if (typeof pickSaveAsTargets !== "function") {
+      throw new Error("当前环境不支持另存为新文件（缺少文件选择器），请改用直接改写或自动备份");
+    }
+    const targets = await pickSaveAsTargets(items);
+    if (!targets) return null;
+    for (const item of items) {
+      if (!targets.get(recordKey(item.record))) {
+        throw new Error(`另存为新文件：${item.record.name} 缺少输出目标`);
+      }
+    }
+    return targets;
+  }
+
+  function targetsShareDirectory(targets) {
+    let common = null;
+    let first = true;
+    for (const target of targets.values()) {
+      const dir = target.parentHandle || null;
+      if (first) { common = dir; first = false; continue; }
+      if (dir !== common) return null;
+    }
+    return common;
+  }
+
+  async function applyChangesToNewFiles(appliedPreviews, metaPreviews, total) {
+    const items = appliedPreviews.map(preview => ({ record: preview, value: preview.newTimeReference }));
+    const targets = await resolveSaveAsTargets(items);
+    if (!targets) return false;
+
+    setState("输出新文件中", "warn");
+    els.applyBtn.disabled = true;
+    els.undoBtn.disabled = true;
+    els.statusLine.textContent = "Writing new files...";
+    updateWriteProgress("正在输出新文件…", "", 0, total);
+    els.progressOverlay.classList.add("show");
+
+    try {
+      await runPool(items, 4, async (item) => {
+        const target = targets.get(recordKey(item.record));
+        updateWriteProgress("正在输出新文件…", `${item.record.name} → ${target.name}`, 0, total);
+        await writeItemToNewFile(item, target, null, 0, total);
+      }, async (done) => {
+        updateWriteProgress("正在输出新文件…", "", done, total);
+      });
+
+      const outputDir = targetsShareDirectory(targets);
+      let manifestName = null;
+      if (outputDir) {
+        try {
+          updateWriteProgress("正在保存清单…", "生成 CSV manifest", total, total);
+          manifestName = await writeManifestToFolder(outputDir, items.map(item => ({
+            ...item.record,
+            relativePath: `${recordLabel(item.record)} → ${targets.get(recordKey(item.record)).name}`,
+          })));
+        } catch (error) {
+          log(`Manifest WARN: ${error.message}`);
+        }
+      } else {
+        log("Manifest SKIP: 单文件另存没有目录句柄，跳过清单（不影响输出文件）。");
+      }
+
+      // 元数据项照旧虚拟应用（驱动 ALE/CSV 导出），WAV 行的 changed 标记不落：
+      // 原文件没有被改动，标绿会误导。
+      const allChanged = new Map();
+      for (const mp of metaPreviews) {
+        allChanged.set(recordKey(mp), mp.newTimeReference);
+      }
+      setChangedTimeReferences(allChanged);
+      setPreviews([]);
+      setActiveOffset(null);
+      renderRows();
+      setState("已输出新文件");
+      const names = items.map(item => targets.get(recordKey(item.record)).name);
+      const extra = metaPreviews.length ? ` + ${metaPreviews.length} 元数据` : "";
+      els.statusLine.textContent = manifestName
+        ? `已输出 ${items.length} 个新文件${extra}（原文件未修改）；清单：${manifestName}`
+        : `已输出 ${items.length} 个新文件${extra}（原文件未修改）`;
+      log(`Save-as OK: ${items.length} file(s) -> ${names.slice(0, 4).join(", ")}${names.length > 4 ? ", …" : ""}`);
+      els.toast.textContent = `✅ 已输出 ${items.length} 个新文件 — 原文件未修改`;
+      els.toast.classList.add("show");
+      setTimeout(() => els.toast.classList.remove("show"), 4500);
+      return true;
+    } finally {
+      els.progressOverlay.classList.remove("show");
+      updateWriteProgress("正在写入…", "", 0, total || 1);
+      els.undoBtn.disabled = !getLastUndoBatch();
+    }
+  }
+
+  async function writeLtcTimecodeToNewFiles(writableItems, muteLtc) {
+    const items = writableItems.map(({ record, ltc }) => ({
+      record,
+      ltc,
+      value: ltc.newTimeReference,
+      mute: muteLtc && recordKey(record) === recordKey(ltc.sourceRecord)
+        ? { channelIndex: ltc.channelIndex, channelLabel: ltc.channelLabel }
+        : null,
+    }));
+    const targets = await resolveSaveAsTargets(items);
+    if (!targets) return false;
+
+    setState("输出新文件中", "warn");
+    els.writeLtcBtn.disabled = true;
+    els.extractLtcBtn.disabled = true;
+    els.applyBtn.disabled = true;
+    els.undoBtn.disabled = true;
+    els.statusLine.textContent = "Writing new files...";
+    updateWriteProgress("正在输出新文件…", "", 0, writableItems.length);
+    els.progressOverlay.classList.add("show");
+
+    try {
+      await runPool(items, 4, async (item) => {
+        const target = targets.get(recordKey(item.record));
+        updateWriteProgress("正在输出新文件…", `${item.record.name} → ${target.name}`, 0, writableItems.length);
+        await writeItemToNewFile(item, target, item.mute, 0, writableItems.length);
+        const { ltc } = item;
+        ltc.ok = false;
+        ltc.status = "ok";
+        ltc.statusText = item.mute
+          ? `已输出到 ${target.name}；原文件未修改，LTC 轨已静音（副本内）`
+          : `已输出到 ${target.name}；原文件未修改`;
+      }, async (done) => {
+        updateWriteProgress("正在输出新文件…", "", done, writableItems.length);
+      });
+
+      // 另存模式不动原文件，没有可撤销的内容，不武装 undo。
+      setPreviews([]);
+      setActiveOffset(null);
+      els.applyBtn.disabled = true;
+      renderRows();
+      setState("已输出新文件");
+      els.statusLine.textContent = `LTC 已输出到 ${writableItems.length} 个新文件（原文件未修改）`;
+      log(`LTC Save-as OK: ${writableItems.length} file(s)`);
+      els.toast.textContent = `✅ LTC 已输出 — ${writableItems.length} 个新文件，原文件未修改`;
+      els.toast.classList.add("show");
+      setTimeout(() => els.toast.classList.remove("show"), 4500);
+      return true;
+    } finally {
+      els.progressOverlay.classList.remove("show");
+      updateWriteProgress("正在写入…", "", 0, writableItems.length || 1);
+      els.extractLtcBtn.disabled = getRecords().length === 0;
+      els.writeLtcBtn.disabled = !Array.from(getLtcResults().values()).some(result => {
+        const record = result?.record;
+        return result?.ok && record && !record._meta && !record._video && record.fileHandle?.createWritable;
+      });
+      els.undoBtn.disabled = !getLastUndoBatch();
+    }
   }
 
   async function writeLtcTimecode() {
@@ -494,8 +745,12 @@ export function createTimeReferenceWriteController({
     }
 
     const muteLtc = shouldMuteLtc?.() !== false;
-    const ok = await confirmWriteChanges(writableItems.length, muteLtc);
-    if (!ok) return;
+    const decision = await confirmWriteChanges(writableItems.length, muteLtc);
+    if (!decision) return;
+    if (decision === "save-as") {
+      await writeLtcTimecodeToNewFiles(writableItems, muteLtc);
+      return;
+    }
 
     setState("LTC写入中", "warn");
     els.writeLtcBtn.disabled = true;
@@ -528,11 +783,12 @@ export function createTimeReferenceWriteController({
         item.backup = backups?.get(recordKey(writableItems[index].record)) || null;
       });
 
-      for (let i = 0; i < writableItems.length; i++) {
-        const { record, ltc } = writableItems[i];
+      // 4 路并发写文件：文件之间互不依赖，瓶颈在字节搬运/磁盘，并行收益直接。
+      // rescan=false：写入循环内文件不会被第三方改动，写后仍有校验步兜底。
+      await runPool(writableItems, 4, async ({ record, ltc }) => {
         const isSource = recordKey(record) === recordKey(ltc.sourceRecord);
-        updateWriteProgress("正在写入 LTC…", recordLabel(record), i, writableItems.length);
-        await writeTimeReference(record, ltc.newTimeReference);
+        updateWriteProgress("正在写入 LTC…", recordLabel(record), 0, writableItems.length);
+        await writeTimeReference(record, ltc.newTimeReference, null, { rescan: false });
         if (isSource && muteLtc) {
           const freshForMute = await scanWave(record.fileHandle, {
             relativePath: record.relativePath,
@@ -541,7 +797,7 @@ export function createTimeReferenceWriteController({
           });
           const writable = await record.fileHandle.createWritable({ keepExistingData: true });
           try {
-            await muteLtcChannel(freshForMute, ltc.channelIndex, writable, i + 0.2, writableItems.length);
+            await muteLtcChannel(freshForMute, ltc.channelIndex, writable, 0, writableItems.length);
           } finally {
             await writable.close();
           }
@@ -553,8 +809,9 @@ export function createTimeReferenceWriteController({
             ? `已写入；第 ${ltc.channelLabel} 轨已静音`
             : `已写入；第 ${ltc.channelLabel} 轨未静音`
           : `已写入；LTC来自 ${ltc.sourceRecord.name}`;
-        updateWriteProgress("正在写入 LTC…", record.name, i + 1, writableItems.length);
-      }
+      }, async (done) => {
+        updateWriteProgress("正在写入 LTC…", "", done, writableItems.length);
+      });
 
       updateWriteProgress("正在校验…", "校验 LTC 写入结果", writableItems.length, writableItems.length);
       for (const { record, ltc } of writableItems) {
@@ -616,8 +873,12 @@ export function createTimeReferenceWriteController({
     }
 
     // Mix of WAV + metadata: write WAV files, virtual-apply metadata
-    const ok = await confirmWriteChanges(wavPreviews.length);
-    if (!ok) return;
+    const decision = await confirmWriteChanges(wavPreviews.length);
+    if (!decision) return;
+    if (decision === "save-as") {
+      await applyChangesToNewFiles(wavPreviews, metaPreviews, wavPreviews.length + metaPreviews.length);
+      return;
+    }
 
     const appliedPreviews = wavPreviews.slice();
     setState("写入中", "warn");
@@ -648,12 +909,14 @@ export function createTimeReferenceWriteController({
         item.backup = backups?.get(recordKey(appliedPreviews[index])) || null;
       });
 
-      for (let i = 0; i < appliedPreviews.length; i++) {
-        const preview = appliedPreviews[i];
-        updateWriteProgress("正在写入…", preview.name, i, total);
-        await writeTimeReference(preview, preview.newTimeReference);
-        updateWriteProgress("正在写入…", preview.name, i + 1, total);
-      }
+      // 4 路并发：文件间无依赖，磁盘/字节搬运是瓶颈。rescan=false 省掉每文件一次
+      // 完整 scanWave（预览数据即导入时的扫描结果，写后仍有校验步兜底）。
+      await runPool(appliedPreviews, 4, async (preview) => {
+        updateWriteProgress("正在写入…", preview.name, 0, total);
+        await writeTimeReference(preview, preview.newTimeReference, null, { rescan: false });
+      }, async (done) => {
+        updateWriteProgress("正在写入…", "", done, total);
+      });
 
       updateWriteProgress("正在校验…", "校验写入结果", total, total);
 

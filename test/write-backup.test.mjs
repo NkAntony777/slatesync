@@ -194,8 +194,8 @@ async function recordIn(dir, name, { withDirectory = true, channels, sampleRate 
   });
 }
 
-// 大于 BACKUP_COPY_CHUNK (8MB) 的素材，用来真正跑多块分片复制路径。
-async function largeRecordIn(dir, name, { withDirectory = true, frames = 5_000_000 } = {}) {
+// 大于 BACKUP_COPY_CHUNK (32MB) 的素材，用来真正跑多块分片复制路径。
+async function largeRecordIn(dir, name, { withDirectory = true, frames = 25_000_000 } = {}) {
   const track = [new Float32Array(frames).fill(0.25)];
   writeWavPcm16(join(dir, name), track, SR);
   return scanWave(fileHandleFor(join(dir, name), name), {
@@ -324,10 +324,10 @@ test("backup failure aborts the write and leaves the source untouched", async ()
 test("mid-copy backup failure leaves no usable backup and never opens the source", async () => {
   const dir = tempDir();
   const sourcePath = join(dir, "ZOOM0003_Tr3.WAV");
-  // 素材大于 8MB 分片，所以备份确实是"分多次写"，第 2 块失败即中途崩溃。
+  // 素材大于 32MB 分片，所以备份确实是"分多次写"，第 2 块失败即中途崩溃。
   const record = await largeRecordIn(dir, "ZOOM0003_Tr3.WAV");
   const originalBytes = readFileSync(sourcePath);
-  assert.ok(originalBytes.length > 8 * 1024 * 1024);
+  assert.ok(originalBytes.length > 32 * 1024 * 1024);
 
   const hooks = {
     onWrite(_stream, count, targetPath) {
@@ -348,13 +348,13 @@ test("mid-copy backup failure leaves no usable backup and never opens the source
   assert.equal(existsSync(join(dir, backupPendingNameFor(backupNameFor("ZOOM0003_Tr3.WAV")))), false);
 });
 
-test("multi-chunk backup of a >8MB file is still byte-identical and restorable", async () => {
+test("multi-chunk backup of a >32MB file is still byte-identical and restorable", async () => {
   const dir = tempDir();
   const name = "ZOOM0003B_Tr3.WAV";
   const sourcePath = join(dir, name);
   const record = await largeRecordIn(dir, name);
   const originalBytes = readFileSync(sourcePath);
-  assert.ok(originalBytes.length > 8 * 1024 * 1024, "fixture must span several copy chunks");
+  assert.ok(originalBytes.length > 32 * 1024 * 1024, "fixture must span several copy chunks");
 
   const { controller } = makeEnv([record], { previews: [{ ...record, newTimeReference: 31337n }] });
   await controller.applyChanges();

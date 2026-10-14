@@ -97,7 +97,8 @@ export function chunkHeader(id, size) {
   return header;
 }
 
-const COPY_CHUNK_SIZE = 8 * 1024 * 1024;
+// 32MB 分块：减少 GB 级素材上的分块往返次数；单块内存峰值可控。
+const COPY_CHUNK_SIZE = 32 * 1024 * 1024;
 
 async function copyFileRange(file, writable, sourceStart, sourceSize, destPos) {
   let remaining = sourceSize;
@@ -271,8 +272,10 @@ export async function writeIxmlTimeReference(record, value, writable) {
   return wrote;
 }
 
-export async function writeTimeReference(preview, value, writable = null) {
-  const record = (!writable && preview.fileHandle)
+export async function writeTimeReference(preview, value, writable = null, { rescan = true } = {}) {
+  // rescan=false 用于调用方刚扫过、且写前不会被第三方改动的场景（写入循环里
+  // 每文件省一次完整 scanWave）。写后仍有独立校验步兜底。
+  const record = (rescan && !writable && preview.fileHandle)
     ? await scanWave(preview.fileHandle, {
       relativePath: preview.relativePath,
       parentPath: preview.parentPath,

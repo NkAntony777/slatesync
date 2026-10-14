@@ -266,16 +266,16 @@
         </details>
 
         <details class="rail-card rail-collapsible" id="backupCard">
-          <summary>写入前备份 <span class="rail-tag">撤销保障</span><span class="chev" aria-hidden="true"></span></summary>
+          <summary>写入前备份 <span class="rail-tag">可选</span><span class="chev" aria-hidden="true"></span></summary>
           <div class="rail-card-body">
-            <label class="check-row" title="写入 BWF 时码或静音 LTC 轨之前，先在源文件同目录留一份字节一致的副本，撤销时整份还原">
-              <input id="backupBeforeWriteInput" type="checkbox" checked>
+            <label class="check-row" title="默认关闭。勾选后，直接改写前会先在源文件同目录留一份字节一致的 .bak 副本，撤销时可完整还原（含被静音的音频）">
+              <input id="backupBeforeWriteInput" type="checkbox">
               <span>写入前备份（.bak）</span>
             </label>
             <p id="backupPlanSummary" class="rail-hint">—</p>
             <div id="backupUnbackedNotice" class="rail-warning" role="status" hidden></div>
             <p class="rail-hint rail-hint-dim">
-              备份命名为 <code>原名.WAV.bak</code>，与源文件同目录。<strong>不会自动清理</strong>；重新导入同一文件夹时会被忽略，不会混进素材列表。关闭开关后撤销只能回写元数据，无法恢复被静音的音频。
+              按需求<strong>默认不再自动备份</strong>：直接改写前弹窗会<strong>强制提醒</strong>自行备份（不勾选确认不了）。想要工具代劳就勾选此项。备份命名为 <code>原名.WAV.bak</code>，与源文件同目录、<strong>不会自动清理</strong>，重新导入时会被忽略。也可以直接选弹窗里的「另存为新文件」，原文件完全不动。
             </p>
           </div>
         </details>
@@ -410,6 +410,10 @@
     <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmCopy">
       <div class="confirm-title" id="confirmTitle">确认写入文件？</div>
       <div class="confirm-copy" id="confirmCopy"></div>
+      <label id="confirmAckRow" class="confirm-ack" hidden>
+        <input id="confirmAckInput" type="checkbox">
+        <span id="confirmAckLabel"></span>
+      </label>
       <div class="confirm-actions">
         <button id="confirmCancelBtn" type="button">取消</button>
         <button id="confirmAltBtn" type="button" hidden>ALE</button>
@@ -572,7 +576,7 @@
       summarizeExportSelection,
       takeHealthFindingsForChecklist,
     } from "./src/confirm-flows.js";
-    import { createTimeReferenceWriteController } from "./src/time-reference-write-controller.js";
+    import { createTimeReferenceWriteController, saveAsNameFor } from "./src/time-reference-write-controller.js";
     import { createUiStateController } from "./src/ui-state.js";
     import {
       combineEligibleGroupsFor,
@@ -657,6 +661,9 @@
       confirmCancelBtn: document.getElementById("confirmCancelBtn"),
       confirmAltBtn: document.getElementById("confirmAltBtn"),
       confirmWriteBtn: document.getElementById("confirmWriteBtn"),
+      confirmAckRow: document.getElementById("confirmAckRow"),
+      confirmAckInput: document.getElementById("confirmAckInput"),
+      confirmAckLabel: document.getElementById("confirmAckLabel"),
       fpsMetadataOverlay: document.getElementById("fpsMetadataOverlay"),
       fpsScopeSelected: document.getElementById("fpsScopeSelected"),
       fpsScopeAll: document.getElementById("fpsScopeAll"),
@@ -1260,9 +1267,9 @@
       const plan = timeReferenceWrite.writePlan();
       const unbacked = plan.unbackedRecords;
       els.backupPlanSummary.textContent = !plan.enabled
-        ? "备份已关闭：写入仍然可用，但撤销只能回写时码元数据，被静音的 LTC 音频无法恢复。"
+        ? "自动备份已关闭（默认）：直接改写前会强制提醒自行备份；想要工具代劳请勾选上方开关。"
         : plan.fileCount
-          ? `本次写入会先在源文件同目录复制 ${plan.fileCount} 个文件（约 ${plan.totalBytesText}）为 .bak，再动原文件。`
+          ? `已勾选自动备份：本次直接改写会先在源文件同目录复制 ${plan.fileCount} 个文件（约 ${plan.totalBytesText}）为 .bak，再动原文件。`
           : "暂无可备份的 WAV（视频文件只导出元数据，不会修改原文件）。";
       if (!unbacked.length) {
         els.backupUnbackedNotice.hidden = true;
@@ -1270,9 +1277,9 @@
         return;
       }
       els.backupUnbackedNotice.innerHTML = [
-        `<strong>${unbacked.length} 个文件拿不到所在目录句柄，无法落备份：</strong>`,
+        `<strong>${unbacked.length} 个文件拿不到所在目录句柄，勾选自动备份时将无法落备份：</strong>`,
         `${unbacked.slice(0, 5).map(name => `<code>${escapeHtml(name)}</code>`).join("、")}${unbacked.length > 5 ? ` 等 ${unbacked.length} 个` : ""}`,
-        "拖入单个文件时浏览器不会给出目录句柄。为了不写出撤销不回来的文件，<strong>这些文件会被拒绝写入</strong>：请改用「选择文件夹」方式导入，或关闭上面的备份开关后再写。",
+        "拖入单个文件时浏览器不会给出目录句柄。勾选自动备份后这些文件会被拒绝写入：请改用「选择文件夹」方式导入，或改用弹窗里的「另存为新文件」。",
       ].join("<br>");
       els.backupUnbackedNotice.hidden = false;
     }
@@ -1406,6 +1413,59 @@
       getLtcResults: () => ltcResults,
       shouldMuteLtc: () => els.muteLtcInput.checked,
       shouldBackup: () => els.backupBeforeWriteInput.checked,
+      pickSaveAsTargets: async (items) => {
+        // 方案二 · 另存为新文件的目标选择：单文件走系统保存对话框；
+        // 多个文件选一个输出文件夹，同名自动加 _2/_3 后缀，不覆盖已有文件。
+        if (items.length === 1) {
+          if (typeof window.showSaveFilePicker !== "function") {
+            throw new Error("当前浏览器不支持保存文件对话框（需要 Chrome / Edge），请改用直接改写");
+          }
+          const item = items[0];
+          let handle;
+          try {
+            handle = await window.showSaveFilePicker({
+              suggestedName: saveAsNameFor(item.record.name),
+              types: [{ description: "WAV 音频", accept: { "audio/wav": [".wav", ".wave"] } }],
+            });
+          } catch (error) {
+            if (error?.name === "AbortError") return null;
+            throw error;
+          }
+          return new Map([[recordKey(item.record), { handle, name: handle.name }]]);
+        }
+        if (typeof window.showDirectoryPicker !== "function") {
+          throw new Error("当前浏览器不支持选择文件夹（需要 Chrome / Edge），请改用直接改写或逐个另存");
+        }
+        let directory;
+        try {
+          directory = await window.showDirectoryPicker({ mode: "readwrite" });
+        } catch (error) {
+          if (error?.name === "AbortError") return null;
+          throw error;
+        }
+        const targets = new Map();
+        for (const item of items) {
+          const suggested = saveAsNameFor(item.record.name);
+          const dot = suggested.lastIndexOf(".");
+          const stem = dot > 0 ? suggested.slice(0, dot) : suggested;
+          const ext = dot > 0 ? suggested.slice(dot) : "";
+          let name = suggested;
+          for (let n = 2; ; n++) {
+            let exists = true;
+            try {
+              await directory.getFileHandle(name);
+            } catch (error) {
+              if (error?.name === "NotFoundError") exists = false;
+              else throw error;
+            }
+            if (!exists) break;
+            name = `${stem}_${n}${ext}`;
+          }
+          const handle = await directory.getFileHandle(name, { create: true });
+          targets.set(recordKey(item.record), { handle, name, parentHandle: directory });
+        }
+        return targets;
+      },
       setChangedTimeReferences: next => { changedTimeReferences = next; },
       refreshTakeGroups,
       offsetInput,
@@ -1663,7 +1723,7 @@
       renderBackupNotice();
       log(els.backupBeforeWriteInput.checked
         ? "Backup ON: 每份 .bak 与源文件等大，磁盘要留出余量，且不会被自动清理。"
-        : "Backup OFF: 撤销只能回写元数据，无法恢复被静音的 LTC 音频。");
+        : "Backup OFF（默认）: 直接改写前仍会强制提醒自行备份；撤销只能回写元数据，无法恢复被静音的 LTC 音频。");
     });
 
     els.fpsInput.addEventListener("change", () => {

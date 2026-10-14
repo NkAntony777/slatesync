@@ -926,19 +926,27 @@ export function confirmOverwriteOutputs(collisionNames, { showConfirmDialog, pro
 }
 
 export function createConfirmFlows({ showConfirmDialog, fpsSelectLabel }) {
+  // 返回：true = 直接改写原文件； "save-as" = 另存为新文件不动原数据； false = 取消。
+  // 直接改写是不可逆操作，确认按钮被"我已自行备份"勾选框锁住（requireAck），
+  // 不勾选点不了；另存为新文件不影响原数据，不受勾选限制。
   function confirmWriteChanges(count, includesLtcMute = false) {
     return showConfirmDialog({
       title: "确认写入文件？",
       danger: true,
-      confirmText: "确认写入",
+      confirmText: "直接改写原文件",
+      altText: "另存为新文件",
+      altResult: "save-as",
+      requireAck: "我已自行备份原始文件，或未备份的风险已知",
       copy: includesLtcMute
         ? [
           `即将写入 <strong>${count}</strong> 个 WAV 的 BWF TimeReference，并将检测到的 LTC 声道/分轨静音。`,
-          "<strong>静音音频轨道或分轨无法用撤销按钮恢复</strong>，请确认已有原始文件备份。"
+          "<strong>方式一 · 直接改写：</strong>原地修改原文件，静音的音频无法用撤销恢复，必须先自行备份（勾选下方确认框后才能继续）。",
+          "<strong>方式二 · 另存为新文件：</strong>输出 <code>原名_TCfix.WAV</code> 副本，原文件一字节都不动，无需备份。",
         ].join("<br>")
         : [
           `即将写入 <strong>${count}</strong> 个 WAV 的 BWF TimeReference。`,
-          "<strong>建议在修改前先备份原始文件</strong>，确认备份或可恢复后再继续。"
+          "<strong>方式一 · 直接改写：</strong>原地修改原文件，必须先自行备份（勾选下方确认框后才能继续）。工具不再自动创建 .bak。",
+          "<strong>方式二 · 另存为新文件：</strong>输出 <code>原名_TCfix.WAV</code> 副本，原文件一字节都不动，无需备份。",
         ].join("<br>"),
     });
   }

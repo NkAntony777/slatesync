@@ -1254,6 +1254,9 @@ input:focus, select:focus {
 .confirm-title { font-size: 16px; font-weight: 750; color: var(--ink); margin-bottom: 8px; }
 .confirm-copy { font-size: 13.5px; line-height: 1.65; color: var(--muted); margin-bottom: 18px; }
 .confirm-copy strong { color: var(--danger); font-weight: 700; }
+.confirm-ack { display: flex; align-items: flex-start; gap: 8px; margin: -6px 0 16px; padding: 10px 12px; border: 1px solid var(--danger); border-radius: 8px; background: rgba(214, 48, 49, 0.06); font-size: 13.5px; color: var(--ink); cursor: pointer; }
+.confirm-ack input { margin-top: 2px; accent-color: var(--danger); }
+.confirm-ack[hidden] { display: none !important; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
 .confirm-actions button { width: auto; }
 .confirm-actions [hidden] { display: none !important; }

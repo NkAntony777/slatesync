@@ -15,6 +15,9 @@ export function createDialogController(els) {
     confirmResult = true,
     altResult = "alt",
     danger = false,
+    // 可选：强制确认勾选框的文案。提供后，确认按钮在勾选之前保持禁用——
+    // 用于"必须已自行备份"这类不可跳过的提醒。
+    requireAck = "",
   }) {
     return new Promise(resolve => {
       const previousFocus = document.activeElement;
@@ -28,6 +31,9 @@ export function createDialogController(els) {
         els.confirmCancelBtn.removeEventListener("click", onCancel);
         els.confirmAltBtn.removeEventListener("click", onAlt);
         els.confirmWriteBtn.removeEventListener("click", onConfirm);
+        els.confirmAckInput?.removeEventListener("change", onAckChange);
+        if (els.confirmAckRow) els.confirmAckRow.hidden = true;
+        if (els.confirmWriteBtn) els.confirmWriteBtn.disabled = false;
         document.removeEventListener("keydown", onKeydown);
         previousFocus?.focus?.();
         resolve(result);
@@ -42,7 +48,12 @@ export function createDialogController(els) {
       }
 
       function onConfirm() {
+        if (els.confirmWriteBtn.disabled) return;
         close(confirmResult);
+      }
+
+      function onAckChange() {
+        els.confirmWriteBtn.disabled = !els.confirmAckInput.checked;
       }
 
       function onKeydown(event) {
@@ -62,6 +73,14 @@ export function createDialogController(els) {
       }
       els.confirmWriteBtn.textContent = confirmText;
       els.confirmWriteBtn.classList.toggle("danger", danger);
+      // 强制勾选：不勾就不给点"确认写入"。另存/取消不受影响。
+      if (requireAck && els.confirmAckRow && els.confirmAckInput) {
+        els.confirmAckLabel.textContent = requireAck;
+        els.confirmAckInput.checked = false;
+        els.confirmAckRow.hidden = false;
+        els.confirmWriteBtn.disabled = true;
+        els.confirmAckInput.addEventListener("change", onAckChange);
+      }
       els.confirmOverlay.classList.add("show");
       els.confirmOverlay.setAttribute("aria-hidden", "false");
       els.confirmCancelBtn.addEventListener("click", onCancel);

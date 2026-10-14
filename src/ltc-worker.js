@@ -1,5 +1,6 @@
 import { LTC_TUNING, normalizeLtcAnalysisSignal } from "./ltc-signal.js";
 import { decodeLtcEdgesRobust } from "./ltc-robust.js";
+import { ltcFrameParityOk } from "./ltc-decoder.js";
 
 export const LTC_WORKER_CODE = `
   const LITTLE = true;
@@ -24,6 +25,7 @@ export const LTC_WORKER_CODE = `
     return { data: normalized, analysisGain: gain };
   }
   const decodeLtcEdgesRobust = ${decodeLtcEdgesRobust.toString()};
+  const ltcFrameParityOk = ${ltcFrameParityOk.toString()};
   const LTC_SYNC_WORDS = ${JSON.stringify([
     "0011111111111101",
     "1011111111111100",
@@ -586,20 +588,48 @@ export const LTC_WORKER_CODE = `
       if (!this.hasSync(candidateBits)) return null;
       const frame = this.parseFrame(candidateBits, fps);
       if (!frame || (strictDrop && frame.drop !== Boolean(fps.drop))) return null;
-      return { ...frame, bitStart: start, sampleStart: decoded.bitStarts[start], sampleEnd: decoded.bitEnds[start + 79], reverse };
+      return { ...frame, bitStart: start, sampleStart: decoded.bitStarts[start], sampleEnd: decoded.bitEnds[start + 79], reverse, parityOk: ltcFrameParityOk(candidateBits, fps) };
     },
+    // 缺陷帧桥接：见 src/ltc-decoder.js 的 consecutiveRun 注释。落点帧必须解析
+    // 干净且时码 == 上一帧 ± k（绝对帧号，DF 由 timecodeToFrames 保证）；桥接
+    // 帧不计入 lockedFrames；桥接路径上校验位同时失败的坏帧禁止跨越。
     consecutiveRun(decoded, start, fps, reverse = false, strictDrop = true) {
       const frames = [];
+      let bridgedFrames = 0;
       for (let offset = 0; offset < 12; offset++) {
-        const frame = this.frameAt(decoded, start + offset * 80, fps, reverse, strictDrop);
-        if (!frame) break;
+        let frame = this.frameAt(decoded, start + offset * 80, fps, reverse, strictDrop);
+        if (!frame) {
+          if (!frames.length) break;
+          if (ltcFrameParityOk(decoded.bits.slice(start + offset * 80, start + offset * 80 + 80), fps) === false) break;
+          const previous = frames[frames.length - 1];
+          let bridged = 0;
+          for (let k = 2; k <= T.bridgeMaxFrames + 1; k++) {
+            const landingStart = start + (offset - 1 + k) * 80;
+            if (landingStart + 80 > decoded.bits.length) break;
+            const landing = this.frameAt(decoded, landingStart, fps, reverse, strictDrop);
+            if (!landing) {
+              if (ltcFrameParityOk(decoded.bits.slice(landingStart, landingStart + 80), fps) === false) break;
+              continue;
+            }
+            const expected = reverse ? previous.frames - BigInt(k) : previous.frames + BigInt(k);
+            if (landing.frames !== expected) break;
+            bridged = k - 1;
+            frame = landing;
+            break;
+          }
+          if (!bridged) break;
+          bridgedFrames += bridged;
+          offset += bridged;
+          frames.push(frame);
+          continue;
+        }
         if (frames.length) {
           const expected = reverse ? frames[frames.length - 1].frames - 1n : frames[frames.length - 1].frames + 1n;
           if (frame.frames !== expected) break;
         }
         frames.push(frame);
       }
-      return frames;
+      return { frames, bridgedFrames };
     },
     qualityFor(candidate) {
       if (candidate.softSync && (candidate.softConfirmOnly || candidate.lockedFrames < T.quality.lowSoftFrames)) return { label: "低", rank: 1 };
@@ -611,11 +641,14 @@ export const LTC_WORKER_CODE = `
       return candidate?.qualityRank >= 3 && candidate.lockedFrames >= T.quality.highFrames && candidate.halfBitError <= T.halfBitError.high && candidate.rejectRatio <= T.quality.highReject && candidate.confidence >= T.quality.highConfidence;
     },
     isDefinitiveCandidate(candidate) {
-      return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= T.halfBitError.definitive;
+      return this.isHighQualityCandidate(candidate) && candidate.halfBitError <= T.halfBitError.definitive && !(candidate.bridgedFrames > 0);
     },
     compareResults(a, b) {
       if ((b.qualityRank || 0) !== (a.qualityRank || 0)) return (b.qualityRank || 0) - (a.qualityRank || 0);
-      if (Math.abs((a.halfBitError || 1) - (b.halfBitError || 1)) > T.halfBitError.definitive) return (a.halfBitError || 1) - (b.halfBitError || 1);
+      // 恰好为 0 的 halfBitError 是完美时钟，不得因 falsy 被当成 1.0；只有
+      // 缺失/非有限值才按最坏误差处理。与 src/ltc-decoder.js 保持一致。
+      const halfBitErrorOf = value => Number.isFinite(value) ? value : 1;
+      if (Math.abs(halfBitErrorOf(a.halfBitError) - halfBitErrorOf(b.halfBitError)) > T.halfBitError.definitive) return halfBitErrorOf(a.halfBitError) - halfBitErrorOf(b.halfBitError);
       if ((b.lockedFrames || 0) !== (a.lockedFrames || 0)) return (b.lockedFrames || 0) - (a.lockedFrames || 0);
       if ((b.confidence || 0) !== (a.confidence || 0)) return (b.confidence || 0) - (a.confidence || 0);
       if (Boolean(a.reverse) !== Boolean(b.reverse)) return Number(a.reverse) - Number(b.reverse);
@@ -626,7 +659,8 @@ export const LTC_WORKER_CODE = `
       let best = null;
       for (const start of syncAnchoredStarts(decoded.bits)) {
         for (const reverse of [false, true]) {
-          const run = this.consecutiveRun(decoded, start, fps, reverse, strictDrop);
+          const runResult = this.consecutiveRun(decoded, start, fps, reverse, strictDrop);
+          const run = runResult.frames, bridgedFrames = runResult.bridgedFrames;
           if (run.length < 2) continue;
           const first = run[0], last = run[run.length - 1];
           // Drift-correct the file-start offset; see src/ltc-decoder.js.
@@ -635,16 +669,21 @@ export const LTC_WORKER_CODE = `
           const corrected = Math.max(0, Math.round(rawSampleOffset / driftRatio));
           const sampleOffset = Math.abs(corrected - rawSampleOffset) >= samplesPerFrame * DRIFT.minCorrectionFrames ? corrected : rawSampleOffset;
           const newTimeReference = normalizeTimeReference(framesToSamples(first.frames, record.sampleRate, fps) - BigInt(sampleOffset), record.sampleRate);
-          const measuredHalfBitSamples = (last.sampleEnd - first.sampleStart) / Math.max(1, run.length * 80 * 2);
+          // 跨度含桥接格子，避免桥接 run 的 halfBitError 虚高；无桥接时与旧式一致。
+          const spanBits = (last.bitStart - first.bitStart) + 80;
+          const measuredHalfBitSamples = (last.sampleEnd - first.sampleStart) / Math.max(1, spanBits * 2);
           const halfBitError = Math.abs(measuredHalfBitSamples - expectedHalfBitSamples) / expectedHalfBitSamples;
+          // 帧率网格否决：超过 lockCeiling 说明候选 fps 本身就是错的，拒绝。
+          if (halfBitError > T.halfBitError.lockCeiling) continue;
           const rejectRatio = decoded.rejected / Math.max(1, decoded.rejected + decoded.bits.length);
+          const parityFailures = run.reduce((sum, frame) => sum + (frame.parityOk === false ? 1 : 0), 0);
           const lockScore = Math.min(1, run.length / 8);
           const halfScore = Math.max(0, Math.min(1, 1 - halfBitError / T.halfBitError.halfScoreSpan));
           const consistencyScore = Math.max(0, Math.min(1, 1 - (decoded.observedJitter || 0) / 0.18));
           const edgeScore = Math.min(1, decoded.bits.length / 320);
           const levelScore = Math.min(1, stats.p2p / 0.6);
-          const confidence = Math.max(0, Math.min(1, lockScore * 0.3 + halfScore * 0.3 + consistencyScore * 0.12 + edgeScore * 0.12 + levelScore * 0.12 - rejectRatio * 0.18 + 0.04));
-          const candidate = { ...first, frames: first.frames.toString(), sampleOffset, newTimeReference: newTimeReference.toString(), confidence, lockedFrames: run.length, reverse, measuredHalfBitSamples, halfBitError, rejectRatio, observedJitter: decoded.observedJitter, driftRatio, driftPpm: Math.round((driftRatio - 1) * 1e6), windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0, diagnostics: { peak: stats.peak, rms: stats.rms, p2p: stats.p2p, decodedBits: decoded.bits.length, rejectedEdges: decoded.rejected, observedJitter: decoded.observedJitter, measuredHalfBitSamples, halfBitError, rejectRatio, driftRatio, driftPpm: Math.round((driftRatio - 1) * 1e6), windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0 } };
+          const confidence = Math.max(0, Math.min(1, lockScore * 0.3 + halfScore * 0.3 + consistencyScore * 0.12 + edgeScore * 0.12 + levelScore * 0.12 - rejectRatio * 0.18 + 0.04 - bridgedFrames * T.bridgeConfidencePenalty - parityFailures * T.parityConfidencePenalty));
+          const candidate = { ...first, frames: first.frames.toString(), sampleOffset, newTimeReference: newTimeReference.toString(), confidence, lockedFrames: run.length, bridgedFrames, parityFailures, reverse, measuredHalfBitSamples, halfBitError, rejectRatio, observedJitter: decoded.observedJitter, driftRatio, driftPpm: Math.round((driftRatio - 1) * 1e6), windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0, diagnostics: { peak: stats.peak, rms: stats.rms, p2p: stats.p2p, decodedBits: decoded.bits.length, rejectedEdges: decoded.rejected, observedJitter: decoded.observedJitter, measuredHalfBitSamples, halfBitError, rejectRatio, bridgedFrames, parityFailures, driftRatio, driftPpm: Math.round((driftRatio - 1) * 1e6), windowStart: stats.windowStart || 0, windowEnd: stats.windowEnd || stats.data?.length || 0 } };
           const quality = this.qualityFor(candidate);
           candidate.qualityLabel = quality.label; candidate.qualityRank = quality.rank;
           if (!best || this.compareResults(candidate, best) < 0) best = candidate;
