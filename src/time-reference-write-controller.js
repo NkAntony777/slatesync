@@ -639,7 +639,7 @@ export function createTimeReferenceWriteController({
             relativePath: `${recordLabel(item.record)} → ${targets.get(recordKey(item.record)).name}`,
           })));
         } catch (error) {
-          log(`Manifest WARN: ${error.message}`);
+          log(`清单: ${error.message}`, "warn");
         }
       } else {
         log("Manifest SKIP: 单文件另存没有目录句柄，跳过清单（不影响输出文件）。");
@@ -942,7 +942,7 @@ export function createTimeReferenceWriteController({
         updateWriteProgress("正在保存清单…", getDirectoryHandle() ? "生成 CSV manifest" : "已跳过清单", total, total);
         manifestName = await writeManifestToFolder();
       } catch (error) {
-        log(`Manifest WARN: ${error.message}`);
+        log(`清单: ${error.message}`, "warn");
       }
 
       const allChanged = new Map(appliedPreviews.map(preview => [recordKey(preview), preview.newTimeReference]));

@@ -506,8 +506,9 @@ export function createLtcController({
             if (result.detected) {
               log(`LTC「${label}」完成（${elapsed}s）→ ${result.detected.timecode}（${result.detected.qualityLabel}${result.detected.requiresConfirmation ? "，需人工确认" : ""}）`);
             } else {
-              const reason = result.detectError ? `错误：${result.detectError.message || result.detectError}` : "未识别到时码";
-              log(`LTC「${label}」完成（${elapsed}s）→ ${reason}`);
+              // 带上声道级失败原因与峰值电平："为什么没锁住"不用用户再描述一遍。
+              const failure = ltcFailureSummary(result.report || [], result.detectError || null);
+              log(`LTC「${label}」完成（${elapsed}s）→ ${failure.message}`, "warn");
             }
           }
 

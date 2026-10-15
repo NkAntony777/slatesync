@@ -49,7 +49,7 @@ export function createCalculatorController({
     try {
       calculateTimecodeDifference();
     } catch (error) {
-      log(`ERROR: ${error.message}`);
+      log(error.message, "error");
     }
   }
 
@@ -106,16 +106,16 @@ export function createCalculatorController({
     els.calcSwapBtn.addEventListener("click", swapCalculatorTimecodes);
 
     els.calcStartUpBtn.addEventListener("click", () => {
-      try { stepTimecodeByFrames(els.calcStartInput, 1, false); refreshCalculator(); } catch (error) { log(`ERROR: ${error.message}`); }
+      try { stepTimecodeByFrames(els.calcStartInput, 1, false); refreshCalculator(); } catch (error) { log(error.message, "error"); }
     });
     els.calcStartDownBtn.addEventListener("click", () => {
-      try { stepTimecodeByFrames(els.calcStartInput, -1, false); refreshCalculator(); } catch (error) { log(`ERROR: ${error.message}`); }
+      try { stepTimecodeByFrames(els.calcStartInput, -1, false); refreshCalculator(); } catch (error) { log(error.message, "error"); }
     });
     els.calcEndUpBtn.addEventListener("click", () => {
-      try { stepTimecodeByFrames(els.calcEndInput, 1, false); refreshCalculator(); } catch (error) { log(`ERROR: ${error.message}`); }
+      try { stepTimecodeByFrames(els.calcEndInput, 1, false); refreshCalculator(); } catch (error) { log(error.message, "error"); }
     });
     els.calcEndDownBtn.addEventListener("click", () => {
-      try { stepTimecodeByFrames(els.calcEndInput, -1, false); refreshCalculator(); } catch (error) { log(`ERROR: ${error.message}`); }
+      try { stepTimecodeByFrames(els.calcEndInput, -1, false); refreshCalculator(); } catch (error) { log(error.message, "error"); }
     });
 
     els.calcFrameInput.addEventListener("focus", () => els.calcFrameInput.select());
@@ -182,7 +182,7 @@ export function createCalculatorController({
             refreshCalculator();
           }
         } catch (error) {
-          log(`ERROR: ${error.message}`);
+          log(error.message, "error");
         }
       });
     }

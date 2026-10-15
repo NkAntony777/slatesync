@@ -49,10 +49,10 @@ export function createOffsetInputController({
   function bindEvents() {
     els.offsetSignBtn.addEventListener("click", toggleOffsetSign);
     els.tcUpBtn.addEventListener("click", () => {
-      try { stepTimecodeByFrames(els.offsetInput, 1); } catch (error) { log(`ERROR: ${error.message}`); }
+      try { stepTimecodeByFrames(els.offsetInput, 1); } catch (error) { log(error.message, "error"); }
     });
     els.tcDownBtn.addEventListener("click", () => {
-      try { stepTimecodeByFrames(els.offsetInput, -1); } catch (error) { log(`ERROR: ${error.message}`); }
+      try { stepTimecodeByFrames(els.offsetInput, -1); } catch (error) { log(error.message, "error"); }
     });
     els.offsetInput.addEventListener("focus", () => els.offsetInput.select());
     els.offsetInput.addEventListener("input", () => normalizeTimecodeInput(els.offsetInput));
@@ -79,7 +79,7 @@ export function createOffsetInputController({
           stepTimecodeAtCaret(els.offsetInput, event.key === "ArrowUp" ? 1 : -1);
         }
       } catch (error) {
-        log(`ERROR: ${error.message}`);
+        log(error.message, "error");
       }
     });
   }

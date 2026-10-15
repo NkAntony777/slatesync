@@ -634,6 +634,9 @@ tbody tr.partial-selected-row td { background: rgba(45, 212, 191, 0.05); }
   padding: 6px 14px 9px;
   white-space: pre-wrap;
 }
+.log-line { display: block; }
+.log-warn { color: var(--warn); }
+.log-error { color: var(--danger); }
 
 /* ===================== side rail ===================== */
 .side-rail {

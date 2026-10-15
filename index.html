@@ -1612,17 +1612,47 @@
     els.writeLtcBtn.addEventListener("click", () => guarded(timeReferenceWrite.writeLtcTimecode));
     els.removeSelectedBtn.addEventListener("click", () => guarded(removeSelectedRecords));
     els.clearListBtn.addEventListener("click", () => guarded(resetListState));
+    // 全局兜底：guarded 之外的未捕获异常/未处理 Promise 拒绝也落日志。
+    // 这是 bug 上报的关键盲区——没有这两行，崩溃在用户端不留任何痕迹。
+    window.addEventListener("error", event => {
+      const where = event.filename ? ` @ ${event.filename.split("/").pop()}:${event.lineno}` : "";
+      log(`未捕获异常: ${event.message}${where}`, "error");
+    });
+    window.addEventListener("unhandledrejection", event => {
+      const reason = event.reason?.message || String(event.reason);
+      log(`未处理的 Promise 拒绝: ${reason}`, "error");
+    });
     els.copyLogBtn.addEventListener("click", () => guarded(async () => {
-      // 组装 bug 上报包：版本 + 环境 + 全量日志（新→旧）。
-      const report = [
+      // 组装 bug 上报包：版本 + 环境 + 素材/设置快照 + 全量日志（新→旧）。
+      // 快照让"我导入了什么、怎么设置的"不需要用户再打字描述。
+      const wavCount = records.filter(r => !r._meta && !r._video).length;
+      const otherCount = records.length - wavCount;
+      const settingsLine = [
+        `设置: fps=${els.fpsInput.value}`,
+        `备份=${els.backupBeforeWriteInput.checked ? "开" : "关"}`,
+        `静音LTC=${els.muteLtcInput.checked ? "开" : "关"}`,
+        `状态=${els.stateText.textContent}`,
+      ].join(" · ");
+      const fileLine = records.slice(0, 30).map(record => {
+        const sizeMB = record.file?.size ? `${(record.file.size / 1024 / 1024).toFixed(1)}MB` : "?";
+        const duration = record.sampleRate && record.durationSamples
+          ? `${(Number(record.durationSamples) / record.sampleRate).toFixed(1)}s`
+          : "?";
+        const detail = record._meta || record._video ? "" : ` ${record.sampleRate}Hz/${record.channels}ch`;
+        return `${record.name}（${sizeMB}, ${duration}${detail}）`;
+      }).join("\n") + (records.length > 30 ? `\n…还有 ${records.length - 30} 个` : "");
+      const reportLines = [
         `SlateSync ${els.appVersionBadge.textContent || "dev"}`,
         `时间: ${new Date().toISOString()}`,
         `浏览器: ${navigator.userAgent}`,
         `视口: ${window.innerWidth}x${window.innerHeight}`,
-        "",
-        "---- 运行日志（新→旧）----",
-        logText() || "（空）",
-      ].join("\n");
+        `内存: ${navigator.deviceMemory ? navigator.deviceMemory + "GB" : "?"} · 并发: ${navigator.hardwareConcurrency || "?"}`,
+        `素材: ${wavCount} 个 WAV${otherCount ? ` + ${otherCount} 个其他` : ""}${records.length ? "" : "（无）"}`,
+        settingsLine,
+      ];
+      if (records.length) reportLines.push(`---- 素材清单 ----\n${fileLine}`);
+      reportLines.push("", "---- 运行日志（新→旧）----", logText() || "（空）");
+      const report = reportLines.join("\n");
       try {
         await navigator.clipboard.writeText(report);
         showToast("✅ 日志已复制，直接粘贴到反馈里即可");

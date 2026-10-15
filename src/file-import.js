@@ -74,7 +74,7 @@ export function createFileImportController({
               parentHandle: handle,
             }));
           } catch (error) {
-            log(`ERROR: ${error.message}`);
+            log(error.message, "error");
           }
         } else if (metadataSuffix && metadataSuffix.test(entry.name)) {
           const text = await readFileAsText(entry);
@@ -205,7 +205,7 @@ export function createFileImportController({
           parentHandle: null,
         }));
       } catch (error) {
-        log(`ERROR: ${error.message}`);
+        log(error.message, "error");
       }
     } else if (entry.isFile && metadataSuffix && metadataSuffix.test(entry.name)) {
       const file = await entryFile(entry);
@@ -241,7 +241,7 @@ export function createFileImportController({
         try {
           await addHandle(handle);
         } catch (error) {
-          log(`ERROR: ${error.message}`);
+          log(error.message, "error");
         }
       }
     } else {
@@ -250,7 +250,7 @@ export function createFileImportController({
           const entry = item.webkitGetAsEntry?.();
           if (entry) await addEntry(entry);
         } catch (error) {
-          log(`ERROR: ${error.message}`);
+          log(error.message, "error");
         }
       }
     }
