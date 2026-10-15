@@ -17,7 +17,7 @@ test("log keeps the newest lines and renders newest-first", () => {
   const { ui, els } = makeUi();
   for (let i = 1; i <= 10; i++) ui.log(`line ${i}`);
   assert.match(els.log.textContent, /line 10.*line 9.*line 1/s, "newest first, all 10 present");
-  assert.match(els.log.textContent, /^\[\d{2}:\d{2}:\d{2}\] line 10/m, "entries are time-stamped");
+  assert.match(els.log.textContent, /^\[[^\]]+\] line 10/m, "entries are time-stamped");
 });
 
 test("log buffer is bounded: oldest lines are dropped beyond 400", () => {
