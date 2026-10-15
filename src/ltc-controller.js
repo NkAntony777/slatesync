@@ -211,9 +211,9 @@ export function createLtcController({
     return auto;
   }
 
-  async function detectLtcFast(record, fps) {
+  async function detectLtcFast(record, fps, options = {}) {
     if (!ltcWorkerPool) return null;
-    const fast = await detectLtcAutoWorker(record, fps, 5, { allowSoftSync: false });
+    const fast = await detectLtcAutoWorker(record, fps, 5, { allowSoftSync: options.allowSoftSync === true });
     return tagLtcAutoResult(fast, { fastScan: true });
   }
 
@@ -367,10 +367,13 @@ export function createLtcController({
 
     // 字段反馈核心诉求：受损/微弱时间码不该要求用户去点隐藏的兜底按钮。
     // 常规扫描全部失败后，对"扫过但没锁住"的记录自动追加一次增强识别——
-    // 与手动按钮完全同一条代码路径（detectLtcFull 带 allowSoftSync），软候选
-    // 自带 requiresConfirmation 与质量封顶，确认流程 UI 已支持。已锁定的记录
-    // 绝不重扫；silent/scan-error 失败直接跳过；显式兜底模式下常规扫描已含
-    // 软路径，不必再来一遍。速度较慢，逐条串行并给出进度提示。
+    // 与手动按钮同一条解码路径（allowSoftSync），软候选自带 requiresConfirmation
+    // 与质量封顶，确认流程 UI 已支持。已锁定的记录绝不重扫；silent/scan-error
+    // 失败直接跳过；显式兜底模式下常规扫描已含软路径，不必再来一遍。
+    // 范围只限前 5 秒快扫窗口：整文件软扫在长素材上要吃掉数分钟且期间
+    // 进度条无法推进（实测反馈"进度条不动"），全文件深度兜底仍交给手动
+    // 「增强识别选中项」按钮（快扫不过关会升级整文件扫描）。逐条串行，
+    // 并用已用秒数告诉用户它还在干活。
     if (options.allowSoftSync !== true) {
       const failedRecords = scanRecords.filter(record =>
         report.some(entry => entry.record === record) &&
@@ -380,14 +383,23 @@ export function createLtcController({
         const recordReport = report.filter(entry => entry.record === record);
         const recordError = recordReport.find(entry => entry.error)?.error || null;
         if (!shouldAutoSoftRetry(recordReport, recordError)) continue;
-        log(`LTC 增强识别: ${record.name} 常规扫描未锁定，自动启用兜底模式重试（速度较慢）…`);
-        updateWriteProgress("正在增强识别 LTC（速度较慢）…", record.name, i, failedRecords.length);
+        log(`LTC 增强识别: ${record.name} 常规扫描未锁定，自动以前 5 秒窗口兜底重试…`);
+        const startedAt = Date.now();
+        const progressLabel = "正在增强识别 LTC（速度较慢）…";
+        const tickProgress = () => updateWriteProgress(
+          progressLabel,
+          `${record.name}（已用时 ${Math.round((Date.now() - startedAt) / 1000)}s）`,
+          i,
+          failedRecords.length
+        );
+        tickProgress();
+        const livenessTimer = setInterval(tickProgress, 1000);
         try {
           const attempt = {
             record,
             auto: ltcWorkerPool
-              ? await detectLtcFull(record, fps, { allowSoftSync: true })
-              : await detectLtcAuto(record, fps, { allowSoftSync: true }),
+              ? await detectLtcFast(record, fps, { allowSoftSync: true })
+              : await decoder.detectAuto(record, fps, { allowSoftSync: true }),
             error: null,
           };
           report.push(summarizeAttempt(record, attempt.auto, null, "soft-auto"));
@@ -397,6 +409,8 @@ export function createLtcController({
           }
         } catch (error) {
           report.push(summarizeAttempt(record, null, error, "soft-auto"));
+        } finally {
+          clearInterval(livenessTimer);
         }
       }
     }
