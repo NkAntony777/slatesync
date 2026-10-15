@@ -305,6 +305,7 @@ export function createTimeReferenceWriteController({
    * 直接把异常抛出去就等于"中止写入，源文件分毫未动"。
    */
   async function createBackupFor(record, onProgress) {
+    const startedAt = Date.now();
     const backupName = backupNameFor(record.name);
     const pendingName = backupPendingNameFor(backupName);
     const directory = record.parentHandle;
@@ -336,7 +337,7 @@ export function createTimeReferenceWriteController({
       if (!await safeRemove(directory, pendingName)) {
         throw new Error(`无法删除完成标记 ${pendingName}，备份无法被识别为有效`);
       }
-      log(`Backup OK: ${record.name} -> ${backupName} (${formatBytes(sourceSize)})`);
+      log(`Backup OK: ${record.name} -> ${backupName} (${formatBytes(sourceSize)}, ${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
       return { name: backupName, directory, handle, size: sourceSize, sourceName: record.name };
     } catch (error) {
       if (writable) {
@@ -553,8 +554,10 @@ export function createTimeReferenceWriteController({
    * mute 为 null 表示这条不需要静音。
    */
   async function writeItemToNewFile(item, target, mute, progressBase, progressTotal) {
+    const itemStart = Date.now();
     const view = await copyRecordToNewFile(item.record, target, (done, bytes) =>
       updateWriteProgress("正在输出新文件…", `${item.record.name} → ${target.name}（复制 ${Math.round((done / Math.max(1, bytes)) * 100)}%）`, progressBase, progressTotal));
+    const copySeconds = (Date.now() - itemStart) / 1000;
     await writeTimeReference(view, item.value, null, { rescan: false });
     let fresh = null;
     if (mute) {
@@ -572,6 +575,8 @@ export function createTimeReferenceWriteController({
       throw new Error(`${target.name}: 新文件写入校验失败`);
     }
     verifyIxmlTimeReference(fresh, item.value, target.name);
+    const totalSeconds = (Date.now() - itemStart) / 1000;
+    log(`输出 ${item.record.name} → ${target.name}：复制 ${copySeconds.toFixed(1)}s，写入+校验 ${(totalSeconds - copySeconds).toFixed(1)}s（共 ${totalSeconds.toFixed(1)}s）`);
     return view;
   }
 
@@ -788,6 +793,7 @@ export function createTimeReferenceWriteController({
       await runPool(writableItems, 4, async ({ record, ltc }) => {
         const isSource = recordKey(record) === recordKey(ltc.sourceRecord);
         updateWriteProgress("正在写入 LTC…", recordLabel(record), 0, writableItems.length);
+        const fileStart = Date.now();
         await writeTimeReference(record, ltc.newTimeReference, null, { rescan: false });
         if (isSource && muteLtc) {
           const freshForMute = await scanWave(record.fileHandle, {
@@ -809,6 +815,7 @@ export function createTimeReferenceWriteController({
             ? `已写入；第 ${ltc.channelLabel} 轨已静音`
             : `已写入；第 ${ltc.channelLabel} 轨未静音`
           : `已写入；LTC来自 ${ltc.sourceRecord.name}`;
+        log(`LTC 写入 ${record.name}${isSource && muteLtc ? "（含静音）" : ""}：完成（${((Date.now() - fileStart) / 1000).toFixed(1)}s）`);
       }, async (done) => {
         updateWriteProgress("正在写入 LTC…", "", done, writableItems.length);
       });
@@ -913,7 +920,9 @@ export function createTimeReferenceWriteController({
       // 完整 scanWave（预览数据即导入时的扫描结果，写后仍有校验步兜底）。
       await runPool(appliedPreviews, 4, async (preview) => {
         updateWriteProgress("正在写入…", preview.name, 0, total);
+        const fileStart = Date.now();
         await writeTimeReference(preview, preview.newTimeReference, null, { rescan: false });
+        log(`写入 ${preview.name}：完成（${((Date.now() - fileStart) / 1000).toFixed(1)}s）`);
       }, async (done) => {
         updateWriteProgress("正在写入…", "", done, total);
       });

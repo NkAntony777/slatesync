@@ -1,13 +1,13 @@
 {
   "name": "slatesync",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "private": true,
   "description": "LTC 合板助手 — 从录音轨 LTC 音频时码倒推起始时码，合并 Poly WAV 并写入 BWF/Resolve",
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/ltc-defective.test.mjs test/poly-compatibility.test.mjs test/poly-combine-batch.test.mjs test/take-grouping.test.mjs test/take-repair.test.mjs test/take-repair-apply.test.mjs test/repair-planner.test.mjs test/merge-rate.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/write-save-as.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs",
-    "test:all": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/ltc-defective.test.mjs test/poly-compatibility.test.mjs test/poly-combine-batch.test.mjs test/take-grouping.test.mjs test/take-repair.test.mjs test/take-repair-apply.test.mjs test/repair-planner.test.mjs test/merge-rate.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/write-save-as.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs",
+    "test": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/ltc-defective.test.mjs test/poly-compatibility.test.mjs test/poly-combine-batch.test.mjs test/take-grouping.test.mjs test/take-repair.test.mjs test/take-repair-apply.test.mjs test/repair-planner.test.mjs test/merge-rate.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/write-save-as.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs test/ui-state-log.test.mjs",
+    "test:all": "node test/run-tests.mjs && node --test test/ltc-low-level.test.mjs test/ltc-defective.test.mjs test/poly-compatibility.test.mjs test/poly-combine-batch.test.mjs test/take-grouping.test.mjs test/take-repair.test.mjs test/take-repair-apply.test.mjs test/repair-planner.test.mjs test/merge-rate.test.mjs test/ltc-parity.test.mjs test/ltc-performance.test.mjs test/ltc-drift.test.mjs test/take-fps.test.mjs test/take-health.test.mjs test/acceptance-checklist.test.mjs test/write-backup.test.mjs test/write-save-as.test.mjs test/export-options.test.mjs test/take-health-ui.test.mjs test/ui-state-log.test.mjs",
     "bench": "node test/bench-ltc.mjs",
     "bench:write": "node test/bench-write.mjs",
     "build:single": "node scripts/build-single-file.mjs",

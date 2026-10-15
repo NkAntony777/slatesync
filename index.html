@@ -114,6 +114,10 @@
               <span class="empty-sub">WAV / MOV / MP4 / ALE / CSV · ZOOM H8 直接拖 FOLDER 文件夹即可</span>
             </div>
           </div>
+          <div class="log-head">
+            <span class="log-title">运行日志</span>
+            <button id="copyLogBtn" type="button" title="复制版本信息与完整日志，便于上报问题">复制日志</button>
+          </div>
           <div id="log" class="log">Ready.</div>
         </section>
 
@@ -641,6 +645,7 @@
       stateText: document.getElementById("stateText"),
       installBtn: document.getElementById("installBtn"),
       statusLine: document.getElementById("statusLine"),
+      copyLogBtn: document.getElementById("copyLogBtn"),
       phasePill: document.getElementById("phasePill"),
       previewTable: document.getElementById("previewTable"),
       previewBody: document.getElementById("previewBody"),
@@ -726,6 +731,7 @@
     const {
       guarded,
       log,
+      logText,
       setState,
       showToast,
       updateWriteProgress,
@@ -1606,6 +1612,32 @@
     els.writeLtcBtn.addEventListener("click", () => guarded(timeReferenceWrite.writeLtcTimecode));
     els.removeSelectedBtn.addEventListener("click", () => guarded(removeSelectedRecords));
     els.clearListBtn.addEventListener("click", () => guarded(resetListState));
+    els.copyLogBtn.addEventListener("click", () => guarded(async () => {
+      // 组装 bug 上报包：版本 + 环境 + 全量日志（新→旧）。
+      const report = [
+        `SlateSync ${els.appVersionBadge.textContent || "dev"}`,
+        `时间: ${new Date().toISOString()}`,
+        `浏览器: ${navigator.userAgent}`,
+        `视口: ${window.innerWidth}x${window.innerHeight}`,
+        "",
+        "---- 运行日志（新→旧）----",
+        logText() || "（空）",
+      ].join("\n");
+      try {
+        await navigator.clipboard.writeText(report);
+        showToast("✅ 日志已复制，直接粘贴到反馈里即可");
+      } catch {
+        // 剪贴板不可用（如 file:// 双击运行单文件版）：退化为下载 .txt。
+        const blob = new Blob([report], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `slatesync-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        showToast("✅ 剪贴板不可用，日志已下载为 .txt");
+      }
+    }));
     calculator.bindEvents({ guarded });
     offsetInput.bindEvents();
     fpsWrite.bindEvents({ guarded });

@@ -404,10 +404,14 @@ export function createLtcController({
           };
           report.push(summarizeAttempt(record, attempt.auto, null, "soft-auto"));
           const retry = bestTakeAttempt([attempt], fpsValue, false);
+          const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
           if (retry.detected) {
+            log(`LTC 增强识别: ${record.name} 完成（${elapsed}s）→ 锁定 ${retry.detected.timecode}（${retry.detected.qualityLabel}${retry.detected.requiresConfirmation ? "，需人工确认" : ""}）`);
             return { takeKey, groupRecords, detected: { ...retry.detected, groupKey: takeKey }, detectError, report };
           }
+          log(`LTC 增强识别: ${record.name} 完成（${elapsed}s）→ 未锁定`);
         } catch (error) {
+          log(`LTC 增强识别: ${record.name} 失败（${((Date.now() - startedAt) / 1000).toFixed(1)}s）→ ${error?.message || error}`);
           report.push(summarizeAttempt(record, null, error, "soft-auto"));
         } finally {
           clearInterval(livenessTimer);
@@ -487,12 +491,25 @@ export function createLtcController({
         for (let i = 0; i < groups.length; i += takeConcurrency) {
           const batch = groups.slice(i, i + takeConcurrency);
           updateWriteProgress("正在检测 LTC…", shortGroupLabel(batch[0]?.[0] || "根目录"), i, groups.length);
+          const takeStartedAt = Date.now();
           const batchResults = await Promise.all(batch.map(([takeKey, groupRecords]) => {
             const cached = preflightResults.get(takeKey);
             if (cached) return cached;
             const take = takeFpsPair(takeKey);
             return detectLtcForTake(takeKey, groupRecords, take.fps, take.fpsValue, allowFpsPrompt, { allowSoftSync });
           }));
+          // 流式日志：每个 take 出结果立即记一行（耗时+结论），批量扫描时
+          // 用户能看到日志持续滚动，而不是对着静止界面猜死活。
+          for (const result of batchResults) {
+            const elapsed = ((Date.now() - takeStartedAt) / 1000).toFixed(1);
+            const label = shortGroupLabel(result.takeKey || "根目录");
+            if (result.detected) {
+              log(`LTC「${label}」完成（${elapsed}s）→ ${result.detected.timecode}（${result.detected.qualityLabel}${result.detected.requiresConfirmation ? "，需人工确认" : ""}）`);
+            } else {
+              const reason = result.detectError ? `错误：${result.detectError.message || result.detectError}` : "未识别到时码";
+              log(`LTC「${label}」完成（${elapsed}s）→ ${reason}`);
+            }
+          }
 
           const mismatch = batchResults.find(result => result.fpsMismatch);
           if (mismatch && allowFpsPrompt) {
