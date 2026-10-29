@@ -18,6 +18,14 @@ import {
   writeAsciiPadded,
   writeAsciiPaddedMultiline,
 } from "./wave-time-reference.js";
+import { equalPowerGains, planCrossfadeRegions, toneSampleAt } from "./room-tone.js";
+import {
+  BEXT_LOUDNESS_ABSENT,
+  applyLoudnessToBext,
+  axmlLoudnessText,
+  createChannelLoudnessMeter,
+  loudnessToBextFields,
+} from "./loudness.js";
 
 export function xmlEscape(value) {
   return String(value ?? "")
@@ -182,7 +190,39 @@ export function bextChunkDataForCombine(baseRecord, sourceInfo, tracks) {
   writeAsciiFixed(data, 320, 10, sourceInfo.originationDate);
   writeAsciiFixed(data, 330, 8, sourceInfo.originationTime);
   view.setBigUint64(338, baseRecord.oldTimeReference, LITTLE);
-  view.setUint16(346, 1, LITTLE);
+  // version 2：多了五个响度字段（EBU Tech 3285）。
+  // UMID（348–411）留全零：本工具不生产实体标识，凭空造一个比不填更糟。
+  view.setUint16(346, 2, LITTLE);
+  // 响度字段先写"没测"（0x8000），量完再回填。
+  view.setInt16(412, BEXT_LOUDNESS_ABSENT, true);
+  view.setUint16(414, 0, true);
+  view.setInt16(416, BEXT_LOUDNESS_ABSENT, true);
+  view.setInt16(418, BEXT_LOUDNESS_ABSENT, true);
+  view.setInt16(420, BEXT_LOUDNESS_ABSENT, true);
+  return data;
+}
+
+/**
+ * chna chunk（EBU Tech 3285 补充件 / BW64 的通道分配）。
+ *
+ * Poly WAV 的全部价值是"第 N 通道就是第 N 支麦克风"，而这个信息原本只存在于
+ * iXML 的 TRACK_LIST 里——那是旧世界的写法。chna 是它的现代等价物，
+ * Resolve、Pro Tools 以及所有按 BW64 读 ADM 的工具都认。
+ *
+ * 离散分轨没有对应的标准扬声器位置，speaker label 用 0xFFFF（未定义），
+ * 真正的身份放在轨道名里。
+ */
+export function chnaChunkDataForCombine(tracks) {
+  const data = new Uint8Array(2 + tracks.length * 80);
+  const view = new DataView(data.buffer);
+  view.setUint16(0, tracks.length, LITTLE);
+  tracks.forEach((track, index) => {
+    const base = 2 + index * 80;
+    view.setUint16(base, index + 1, LITTLE);   // 轨道号（1 起）
+    view.setUint16(base + 2, 0xffff, LITTLE);   // 扬声器标签：未定义（离散分轨）
+    writeAsciiFixed(data, base + 4, 12, "");    // 扬声器标签的 ASCII 名
+    writeAsciiFixed(data, base + 16, 64, track.channelName ?? "");
+  });
   return data;
 }
 
@@ -244,8 +284,29 @@ export function fmtChunkDataForCombine(baseRecord, channels, blockAlign) {
   return data;
 }
 
+/**
+ * 写一个 24 bit 整 PCM 采样。
+ *
+ * 位深下降时要抖动：32 bit 浮点或 32 bit 整数转 24 bit 是有损的，
+ * 直接取整（截断）会在安静段落产生可闻的量化台阶——那是"数字静音的近亲"，
+ * 听起来像底噪忽大忽小。TPDF 抖动（两个均匀随机之和）把截断误差摊成平稳的噪声，
+ * 代价是噪声底比理论值高约 3 dB。
+ *
+ * 抖动用确定性 PRNG 而不是 Math.random()：抖动本身是随机的，
+ * 但同一份素材每次导出应当得到同样的字节，否则"可复现"这条就没了。
+ */
 export function pcm24Sample(view, offset, sample, stats = {}) {
   if (!Number.isFinite(sample)) { stats.invalidSamples = (stats.invalidSamples || 0) + 1; sample = 0; }
+  const ditherAmount = Number(stats.ditherAmount) || 0;
+  if (ditherAmount > 0) {
+    stats.ditherState = (Math.imul(Number(stats.ditherState) >>> 0, 1664525) + 1013904223) >>> 0;
+    const first = stats.ditherState;
+    stats.ditherState = (Math.imul(stats.ditherState, 1664525) + 1013904223) >>> 0;
+    const second = stats.ditherState;
+    // 两个 [0,1) 均匀随机之和减 1：峰峰值正好一个 LSB 的 TPDF 抖动。
+    const tpdf = (first >>> 8) / 16777216 + (second >>> 8) / 16777216 - 1;
+    sample += tpdf * ditherAmount;
+  }
   if (sample < -1 || sample > 1) stats.clippedSamples = (stats.clippedSamples || 0) + 1;
   const value = Math.max(-8388608, Math.min(8388607, Math.round(Math.max(-1, Math.min(1, sample)) * 8388608)));
   view.setUint8(offset, value & 255);
@@ -299,7 +360,25 @@ function repairLookup(repair) {
   return () => null;
 }
 
-function normalizeTrackRepair(input) {
+/**
+ * 把一段淡化区间的等功率增益预计算成表。
+ * 写入的热路径每帧每轨都要用这两个值，而曲线是固定的——
+ * 预计算一次，运行时只剩一次数组索引。
+ */
+function crossfadeGainTable(region) {
+  if (!region) return null;
+  const length = Math.max(1, region.end - region.start);
+  const a = new Float32Array(length);
+  const b = new Float32Array(length);
+  for (let index = 0; index < length; index++) {
+    const gains = equalPowerGains(index, length);
+    a[index] = gains.a;
+    b[index] = gains.b;
+  }
+  return { start: region.start, end: region.end, a, b };
+}
+
+function normalizeTrackRepair(input, context = {}) {
   if (!input || typeof input !== "object") return null;
   // needsOffset / needsResample 是 planTrackRepair 自己定的门槛（|lead| > 0.5、|ratio-1| > 1e-5）。
   // 调用方已经判过"不值得改"，这里就必须真的不改，否则会绕过那道门槛白白损失音质。
@@ -318,10 +397,62 @@ function normalizeTrackRepair(input) {
   // 出现这种组合多半是调用方把符号搞反了，宁可整份计划作废，也不半信半疑地执行。
   if (leadSamples >= 0 && skipSamples > 0) return null;
   const driftRatio = ratio;
+  // 亚采样偏移：leadExact 是精确的小数时延，leadFraction 是它相对整数部分的小数。
+  // 老计划没有这两个字段，退化成 0，行为与改动前逐样本一致。
+  const leadExact = Number.isFinite(Number(input.leadExact)) ? Number(input.leadExact) : leadSamples;
+  const leadFraction = Number.isFinite(Number(input.leadFraction)) ? Number(input.leadFraction) : leadExact - leadSamples;
+  // 亚采样修正单独一档：它不改变对齐的整数部分，只把小数那部分真正用上。
+  const needsSubSample = input.needsSubSample === false ? false : Math.abs(leadFraction) >= 0.05;
   // 什么都不改的轨不挂 repair，让它继续走字节拷贝路径：
   // 于是"开了开关但某轨无需修正"和"没开开关"在输出上完全一样。
-  if (leadSamples === 0 && skipSamples === 0 && driftRatio === 1 && polarity === 1) return null;
-  return { leadSamples, skipSamples, driftRatio, polarity };
+  if (leadSamples === 0 && skipSamples === 0 && driftRatio === 1 && polarity === 1 && !needsSubSample) return null;
+  // 内容区：真实内容在输出帧上占据的区间，补白区是它前后剩下的部分。
+  const outputSamples = Number(context.outputSamples);
+  const contentStart = Number.isFinite(Number(input.contentStart))
+    ? Math.max(0, Math.round(Number(input.contentStart)))
+    : Math.max(0, leadSamples);
+  // contentEnd 拿不到时不能退成 contentStart（那等于"内容区是空的"，整条轨都会变成补白）。
+  // 退成输出长度，甚至退成无穷：内容到底在哪结束，由"源还读不读得到"来判定，
+  // 那才是真正可靠的边界。
+  const contentEnd = Number.isFinite(Number(input.contentEnd))
+    ? Math.max(contentStart, Math.round(Number(input.contentEnd)))
+    : (Number.isSafeInteger(outputSamples) && outputSamples > 0 ? outputSamples : Number.POSITIVE_INFINITY);
+  // 交叉淡化窗口：只有真的存在补白区的那一端才给窗口。
+  const regions = context.crossfade?.enabled === true
+    ? planCrossfadeRegions({ contentStart, contentEnd, outputSamples, crossfadeSamples: context.crossfade.samples })
+    : { head: null, tail: null, samples: 0, contentStart, contentEnd };
+  // 淡化增益预计算成表：原来每个采样、每条轨都要算两次 cos/sin，
+  // 一条 60 分钟的轨就是上亿次超越函数调用，纯属浪费——曲线是固定的。
+  const crossfade = {
+    head: crossfadeGainTable(regions.head),
+    tail: crossfadeGainTable(regions.tail),
+    samples: regions.samples,
+    contentStart: regions.contentStart,
+    contentEnd: regions.contentEnd,
+  };
+  // 房间声模板由读盘那层准备好挂进计划；没找到可信片段时就是 null，
+  // 此时补白退回数字静音——宁可安静，也不用一段错的底噪。
+  const tone = input.roomTone;
+  const roomTone = context.roomTone?.enabled === true && tone?.loop?.length
+    ? {
+        loop: tone.loop,
+        rms: Number.isFinite(Number(tone.rms)) ? Number(tone.rms) : null,
+        startFrame: Number.isFinite(Number(tone.startFrame)) ? Number(tone.startFrame) : null,
+      }
+    : null;
+  return {
+    leadSamples,
+    leadExact,
+    leadFraction,
+    skipSamples,
+    driftRatio,
+    polarity,
+    needsSubSample,
+    contentStart,
+    contentEnd,
+    crossfade,
+    roomTone,
+  };
 }
 
 /**
@@ -336,7 +467,11 @@ export function enableTrackRepairs(tracks, repair) {
     // 先按精确的 sourceTrackKey 找，找不到再回退到 recordKey——
     // 整条文件共用一份计划的用法（多声道文件）不必为每个声道重复登记。
     const input = lookup(sourceTrackKey(track)) ?? lookup(recordKey(track.record));
-    const normalized = normalizeTrackRepair(input);
+    const normalized = normalizeTrackRepair(input, {
+      outputSamples: repair.outputSamples,
+      crossfade: repair.crossfade,
+      roomTone: repair.roomTone,
+    });
     if (!normalized) return;
     track.repair = normalized;
     const trim = Number(input.trimSamples);
@@ -358,6 +493,13 @@ export function enableTrackRepairs(tracks, repair) {
       trimSamples: Number.isFinite(trim) ? Math.max(0, Math.round(trim)) : 0,
       // 只报告不执行：裁掉的是真实录音，必须由人在界面上显式选择后才该消失。
       trimApplied: false,
+      // 亚采样修正：整数偏移之外的小数部分，写入层用线性插值真正用上。
+      subSampleOffset: normalized.leadFraction,
+      // 接缝处做了等功率交叉淡化（只在真有补白区的那一端）。
+      crossfadeApplied: Boolean(normalized.crossfade.head || normalized.crossfade.tail),
+      // 房间声补白是否真的用上了：没找到可信片段时为 false，补白退回数字静音。
+      roomToneApplied: Boolean(normalized.roomTone),
+      roomToneRms: normalized.roomTone?.rms ?? null,
     });
   });
   return reports;
@@ -393,7 +535,10 @@ function repairOutputFrames(groupRecords, options) {
 // lead 活在源帧域（measureOffset 量的是原始 target 的时延），
 // 而重采样比 driftRatio = 输出帧数 / 源帧数，换算回源帧域要除以它。
 function repairSourcePosition(outputFrame, repair) {
-  return (outputFrame - repair.leadSamples) / repair.driftRatio;
+  // leadExact 是带小数部分的精确时延；没有这个字段的老计划退回到整数 lead。
+  // 小数那部分正是"两台设备时钟一致、只差零点几拍"这种常见场景下唯一能拿到的精度。
+  const lead = Number.isFinite(repair.leadExact) ? repair.leadExact : repair.leadSamples;
+  return (outputFrame - lead) / repair.driftRatio;
 }
 
 // 源文件里到底有多少帧。畸形 record（没有时长、没有 file）退化成 0，
@@ -435,6 +580,16 @@ export async function writeCombinedData(writable, state, plan, progressBase, pro
   const mutedSourceChannels = plan.mutedSourceChannels || new Set();
   // 有没有被修正的轨。一条都没有被修正时，读取窗口和取样公式都退回原来那条纯拷贝路径。
   const hasRepair = tracks.some(track => track.repair);
+  // 响度表：每条输出通道一套。K 加权与块能量很便宜，真峰值贵（每采样上百次乘加），
+  // 所以只有程序通道算真峰值，其余通道只要积分响度。
+  const loudnessEnabled = plan.loudness?.enabled !== false;
+  const programIndex = Number.isInteger(plan.programChannelIndex) ? plan.programChannelIndex : 0;
+  const meters = loudnessEnabled
+    ? tracks.map((_, index) => createChannelLoudnessMeter({
+        sampleRate: plan.first.sampleRate,
+        truePeak: index === programIndex,
+      }))
+    : null;
   // 同一文件的多条轨必须共享一次读取。原来靠 recordKey 去重、默认按第一条轨的窗口读，
   // 这里改成显式分组：同一文件里不同轨的修正参数可以不同，窗口要按并集算。
   const recordGroups = [];
@@ -504,34 +659,85 @@ export async function writeCombinedData(writable, state, plan, progressBase, pro
         const destOffset = frame * blockAlign + outTrack * bytesPerSample;
         if (mutedSourceChannels.has(sourceChannelKey)) {
           writeSilenceSample(outView, destOffset, outputRecord);
+          // 静音通道也要喂一次：每条通道的表必须每帧收到一个值，否则块边界会错位。
+          meters?.[outTrack]?.push(0);
           continue;
         }
         const repair = track.repair;
-        const position = repair ? repairSourcePosition(frameBase + frame, repair) : frameBase + frame;
+        const outputFrame = frameBase + frame;
+        let position = repair ? repairSourcePosition(outputFrame, repair) : outputFrame;
+        // 亚采样边界：位置落在源起点前不足一个采样时，夹到源的第一帧。
+        // 不夹的话，一个 0.37 采样的偏移会让第一帧被判成越界——内容被整整挪走一帧，
+        // 还凭空多出一帧补白，亚采样修正就变成了"偏移一帧"。
+        if (position < 0 && position > -1) position = 0;
         const frameIndex = Math.floor(position);
         const view = sourceViews.get(key);
         const startFrame = windowStarts.get(key);
-        // 越界（头部补静音的负下标、尾部超出源长）一律写静音，和静音通道走同一个出口。
-        if (!view || frameIndex < startFrame || frameIndex >= startFrame + windowFrames.get(key)) {
-          writeSilenceSample(outView, destOffset, outputRecord);
-          continue;
-        }
-        const sourceOffset = (frameIndex - startFrame) * track.record.blockAlign + track.channelIndex * sourceBytesPerSample;
-        const sample = readAudioSample(view, sourceOffset, track.record);
+        const windowEnd = startFrame + windowFrames.get(key);
+        const inWindow = Boolean(view) && frameIndex >= startFrame && frameIndex < windowEnd;
         if (!repair) {
+          // 越界（源比输出短）一律写静音，和静音通道走同一个出口。
+          if (!inWindow) {
+            writeSilenceSample(outView, destOffset, outputRecord);
+            continue;
+          }
+          const sourceOffset = (frameIndex - startFrame) * track.record.blockAlign + track.channelIndex * sourceBytesPerSample;
+          const sample = readAudioSample(view, sourceOffset, track.record);
+          meters?.[outTrack]?.push(sample);
           if (plan.encoding === "pcm24") pcm24Sample(outView, destOffset, sample, plan);
           else out.set(sourceBuffers.get(key).subarray(sourceOffset, sourceOffset + bytesPerSample), destOffset);
           continue;
         }
-        let value = sample;
-        const fraction = position - frameIndex;
-        if (repair.driftRatio !== 1 && fraction > 0) {
-          const nextIndex = Math.min(frameIndex + 1, startFrame + windowFrames.get(key) - 1);
-          const nextOffset = (nextIndex - startFrame) * track.record.blockAlign + track.channelIndex * sourceBytesPerSample;
-          const next = nextIndex === frameIndex ? sample : readAudioSample(view, nextOffset, track.record);
-          value = sample * (1 - fraction) + next * fraction;
+        // 内容区是真实内容，补白区是它前后剩下的部分：默认整帧要么是内容，要么是补白。
+        const inContent = outputFrame >= repair.contentStart && outputFrame < repair.contentEnd;
+        let contentGain = inContent ? 1 : 0;
+        let fillGain = inContent ? 0 : 1;
+        // 等功率交叉淡化（P0-2）：接缝处把内容与补白等功率混合，感知响度全程恒定。
+        // 等增益（线性互补）在中点会有可闻的功率凹陷，恰好在需要无缝的地方挖了个洞。
+        const crossfade = repair.crossfade;
+        const headFade = crossfade?.head;
+        const tailFade = crossfade?.tail;
+        if (headFade && outputFrame >= headFade.start && outputFrame < headFade.end) {
+          const offset = outputFrame - headFade.start;
+          contentGain = headFade.b[offset];
+          fillGain = headFade.a[offset];
+        } else if (tailFade && outputFrame >= tailFade.start && outputFrame < tailFade.end) {
+          const offset = outputFrame - tailFade.start;
+          contentGain = tailFade.a[offset];
+          fillGain = tailFade.b[offset];
         }
-        if (repair.polarity === -1) value = -value;
+        // 源读不到却落在内容区：那是录音提前断了，按补白处理，别在中间留一个洞。
+        if (contentGain > 0 && !inWindow) {
+          contentGain = 0;
+          fillGain = 1;
+        }
+        let value = 0;
+        if (contentGain > 0) {
+          const sourceOffset = (frameIndex - startFrame) * track.record.blockAlign + track.channelIndex * sourceBytesPerSample;
+          const sample = readAudioSample(view, sourceOffset, track.record);
+          value = sample;
+          // 小数偏移的线性插值：原来只在重采样时插值，纯偏移（driftRatio === 1）
+          // 的小数部分被白白丢掉——那正是亚采样对齐唯一能派上用场的地方。
+          const fraction = position - frameIndex;
+          if (fraction > 0) {
+            const nextIndex = Math.min(frameIndex + 1, windowEnd - 1);
+            const nextOffset = (nextIndex - startFrame) * track.record.blockAlign + track.channelIndex * sourceBytesPerSample;
+            const next = nextIndex === frameIndex ? sample : readAudioSample(view, nextOffset, track.record);
+            value = sample * (1 - fraction) + next * fraction;
+          }
+          if (repair.polarity === -1) value = -value;
+          value *= contentGain;
+        }
+        if (fillGain > 0 && repair.roomTone?.loop?.length) {
+          // 房间声模板取自原始轨，极性要与内容保持一致。
+          let tone = toneSampleAt(repair.roomTone.loop, outputFrame);
+          if (repair.polarity === -1) tone = -tone;
+          // 电平对齐：补白区的底噪应当与内容里那条底噪齐平，否则接缝处会听出
+          // "底噪换了一层"。各轨各找时模板本来就取自本轨，天然齐平；
+          // 共用一份底噪时按各轨自己的噪声底做一次宽带校正（限幅 ±6 dB）。
+          value += tone * fillGain * (repair.roomTone.gain ?? 1);
+        }
+        meters?.[outTrack]?.push(value);
         if (plan.encoding === "pcm24") pcm24Sample(outView, destOffset, value, plan);
         else writeSourceSample(outView, destOffset, value, outputRecord);
       }
@@ -546,6 +752,7 @@ export async function writeCombinedData(writable, state, plan, progressBase, pro
     await writable.write({ type: "write", position: state.position, data: new Uint8Array([0]) });
     state.position += 1;
   }
+  return meters ? meters.map(meter => meter.finish()) : null;
 }
 
 export async function writeCombinedPolyToWritable(key, groupRecords, writable, outputName, options = {}) {
@@ -559,6 +766,21 @@ export async function writeCombinedPolyToWritable(key, groupRecords, writable, o
   }
   // Clean profiles physically exclude confirmed LTC; archive preserves old mute behavior.
   plan.mutedSourceChannels = plan.profile.id === "archive" ? options.mutedSourceChannels || new Set() : new Set();
+  // 响度：默认开启。它只测量、只写元数据，不改动任何采样。
+  plan.loudness = { enabled: options.loudness?.enabled !== false, target: options.loudness?.target || "r128" };
+  // 抖动：只有位深真的下降时才需要。
+  // 16 bit → 24 bit 是升位，不抖；24 bit → 24 bit 不抖；
+  // 32 bit 整数或浮点 → 24 bit 是降位，必须抖，否则安静段落有量化台阶。
+  const sourceBits = Number(plan.first.bitsPerSample);
+  const sourceIsFloat = Boolean(plan.first.isFloat || plan.first.audioFormat === 3);
+  plan.ditherAmount = plan.encoding === "pcm24" && (sourceIsFloat || sourceBits > 24) ? 1 / 8388608 : 0;
+  plan.ditherState = 0x9e3779b9;
+  // 程序通道 = 第一个不是已确认 LTC 的输出通道。响度字段写的是它的读数：
+  // Poly 是分轨素材，整体节目响度要到混音阶段（Resolve）才算，
+  // 这里报的是这一条节目轨自己的电平，各轨之间也各有各的读数。
+  const programChannelIndex = plan.tracks.findIndex(track =>
+    !plan.mutedSourceChannels.has(`${recordKey(track.record)}:${track.channelIndex}`));
+  plan.programChannelIndex = programChannelIndex >= 0 ? programChannelIndex : 0;
   // 对齐/纠错默认关闭：只有调用方显式传 repair.enabled 才会按修正计划改写每条轨。
   const repairs = enableTrackRepairs(plan.tracks, options.repair);
   const groupName = safeWaveBaseName(shortGroupLabel(key));
@@ -566,18 +788,28 @@ export async function writeCombinedPolyToWritable(key, groupRecords, writable, o
   const state = { position: 0 };
   const bext = bextChunkDataForCombine(plan.first, sourceInfo, plan.tracks);
   const ixml = new TextEncoder().encode(ixmlTextForCombine(plan.first, sourceInfo, plan.tracks));
+  const chna = chnaChunkDataForCombine(plan.tracks);
   const fmt = fmtChunkDataForCombine(plan.outputRecord, plan.tracks.length, plan.blockAlign);
   const fact = plan.outputRecord.isFloat || plan.outputRecord.audioFormat === 3 ? new Uint8Array(4) : null;
   if (fact) new DataView(fact.buffer).setUint32(0, Number(plan.durationSamples > 0xffffffffn ? 0xffffffffn : plan.durationSamples), LITTLE);
+  // axml 里装响度，量完才写得出，所以它的长度只能先按最宽的取值估。
+  // 真正的 RIFF 长度在最后按实际位置回填，这里只用来判断要不要走 RF64。
+  const axmlEstimate = new TextEncoder().encode(axmlLoudnessText({
+    integrated: -999.9, truePeak: -999.9, maxMomentary: -999.9, maxShortTerm: -999.9, range: 999.9,
+  })).byteLength;
   const riffBody =
     4 +
     (8 + bext.byteLength + (bext.byteLength & 1)) +
     (8 + ixml.byteLength + (ixml.byteLength & 1)) +
+    (8 + chna.byteLength + (chna.byteLength & 1)) +
     (8 + fmt.byteLength + (fmt.byteLength & 1)) +
     (fact ? 12 : 0) +
-    (8 + plan.dataSize + (plan.dataSize & 1));
+    (8 + plan.dataSize + (plan.dataSize & 1)) +
+    (8 + axmlEstimate + (axmlEstimate & 1));
   const useRf64 = riffBody > 0xffffffff;
 
+  let measurements = null;
+  let programMeasurement = null;
   try {
     await writable.write({
       type: "write",
@@ -594,11 +826,23 @@ export async function writeCombinedPolyToWritable(key, groupRecords, writable, o
       await writable.write({ type: "write", position: state.position, data: placeholder });
       state.position += placeholder.byteLength;
     }
+    // bext 的数据段起点：chunk 头占 8 字节。响度是量完才知道的，
+    // 所以先按"没测"写出去，量完再原位回填（定位写在 RIFF 长度回填里已经用过）。
+    const bextOffset = state.position + 8;
     await writeChunk(writable, state, "bext", bext);
     await writeChunk(writable, state, "iXML", ixml);
+    await writeChunk(writable, state, "chna", chna);
     await writeChunk(writable, state, "fmt ", fmt);
     if (fact) await writeChunk(writable, state, "fact", fact);
-    await writeCombinedData(writable, state, plan, progressBase, progressTotal, options.onProgress);
+    measurements = await writeCombinedData(writable, state, plan, progressBase, progressTotal, options.onProgress);
+    // 响度回填 bext version 2 的五个字段，并把同一组数写进 axml（放在 data 之后）。
+    programMeasurement = measurements?.[plan.programChannelIndex] ?? null;
+    if (measurements) {
+      applyLoudnessToBext(bext, loudnessToBextFields(programMeasurement));
+      await writable.write({ type: "write", position: bextOffset, data: bext });
+      const axml = new TextEncoder().encode(axmlLoudnessText(programMeasurement));
+      await writeChunk(writable, state, "axml", axml);
+    }
     const riffSize = state.position - 8;
     if (useRf64) {
       await writable.write({
@@ -629,6 +873,15 @@ export async function writeCombinedPolyToWritable(key, groupRecords, writable, o
     tracks: plan.tracks.map((track, index) => ({ outputChannel: index + 1, name: track.channelName, source: recordKey(track.record), sourceChannel: track.channelIndex + 1, sourceKey: sourceTrackKey(track) })),
     // 只有开了修正才带这个字段：默认路径的返回结构保持原样，别的模块不会看到多出来的键。
     ...(repairs ? { repairs } : null),
+    // 响度读数：每条输出通道一份，外加程序通道的汇总。
+    ...(measurements ? {
+      loudness: {
+        programChannel: plan.programChannelIndex + 1,
+        program: programMeasurement,
+        channels: measurements,
+        target: plan.loudness.target,
+      },
+    } : null),
     excludedTracks: plan.excludedTracks.map(track => ({ source: recordKey(track.record), sourceChannel: track.channelIndex + 1, reason: track.reason })),
     clippedSamples: plan.clippedSamples, invalidSamples: plan.invalidSamples,
   };

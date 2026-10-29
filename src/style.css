@@ -708,6 +708,16 @@ tbody tr.partial-selected-row td { background: rgba(45, 212, 191, 0.05); }
 }
 .check-row input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
 
+/* 「对齐修复」下面的两个细化项：缩进显示，让人一眼看出它们依附于总开关。 */
+.export-repair-extra {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 0 22px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line, rgba(127, 127, 127, 0.28));
+}
+.export-repair-extra .check-row { font-weight: 500; color: var(--muted); }
+
 .rail-collapsible { padding: 0; }
 .rail-collapsible > summary {
   list-style: none;

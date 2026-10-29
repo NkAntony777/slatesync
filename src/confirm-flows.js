@@ -154,6 +154,30 @@ export const REPAIR_REFERENCE_AUTO_LABEL = "自动（第一条未被排除的轨
  * 已经被方案排除或用户取消勾选的轨根本不会进输出，让它当基准没有意义。
  * value 用 sourceTrackKey（"文件名:声道下标"），和引擎读的是同一个键。
  */
+/**
+ * 房间声来源的候选项。
+ *
+ * 与修复基准轨取同一套通道（主 Poly 里保留的节目通道），但第一项的含义不同：
+ * 修复基准轨的"自动"是"取第一条未被排除的轨"；房间声来源的"自动"是
+ * "各轨各找自己最安静的一段"——没指定来源时没有共用底噪，
+ * 多轨叠到单声道母线时房间声会随轨数起伏，而不是一个稳定的声场。
+ */
+export function buildRoomToneSourceOptions({
+  choices,
+  profileId = "resolve",
+  checkedKeys = new Set(),
+  value = "",
+}) {
+  const model = buildRepairReferenceOptions({ choices, profileId, checkedKeys, value });
+  return {
+    options: model.options.map((option, index) => (index === 0
+      ? { ...option, label: "自动（各轨各找最安静的一段）" }
+      : option)),
+    selected: model.selected,
+    hintText: "指定后所有分轨共用同一份底噪：各轨各找的话，互不相关的噪声叠在一起并不相干，房间声会随轨数起伏。",
+  };
+}
+
 export function buildRepairReferenceOptions({
   choices,
   profileId = "resolve",
@@ -206,6 +230,14 @@ export function buildExportOptions({
   groupCount = 1,
   repairEnabled = false,
   repairKey = "",
+  // 交叉淡化与房间声补白：都是"对齐修复"的细化项，默认关闭。
+  crossfadeEnabled = false,
+  roomToneEnabled = false,
+  roomToneSourceKey = "",
+  loudnessEnabled = true,
+  loudnessTarget = "r128",
+  waveformEnabled = false,
+  waveformReferenceKey = "",
 } = {}) {
   const profile = polyExportProfile(profileId);
   if (!choices) throw new Error("输出通道清单还没准备好，请重新点击「合并 Poly WAV」");
@@ -239,6 +271,25 @@ export function buildExportOptions({
   options.repair = {
     enabled: Boolean(repairEnabled),
     referenceKey: typeof repairKey === "string" ? repairKey.trim() : "",
+    // 这两项是"对齐修复"的细化：没有补白就没有接缝，所以主开关关着时它们一律无效。
+    // 各自独立默认关闭——凡是会改动音频内容的步骤，都必须由用户显式勾选。
+    crossfade: { enabled: Boolean(repairEnabled) && Boolean(crossfadeEnabled) },
+    roomTone: {
+      enabled: Boolean(repairEnabled) && Boolean(roomToneEnabled),
+      // 空串 = 各轨各找自己最安静的一段；指定了就是所有轨共用这一份底噪。
+      sourceKey: typeof roomToneSourceKey === "string" ? roomToneSourceKey.trim() : "",
+    },
+    // 响度：只测量、只写元数据，不改动任何采样，所以不挂在"对齐修复"下面。
+    loudness: {
+      enabled: Boolean(loudnessEnabled),
+      target: typeof loudnessTarget === "string" && loudnessTarget.trim() ? loudnessTarget.trim() : "r128",
+    },
+    // 波形对齐：LTC 之外的第二条对齐路径。参考声由界面指定，
+    // 空串 = 没选参考声 = 不启用。
+    waveform: {
+      enabled: Boolean(repairEnabled) && Boolean(waveformEnabled),
+      referenceKey: typeof waveformReferenceKey === "string" ? waveformReferenceKey.trim() : "",
+    },
   };
   return options;
 }

@@ -229,8 +229,9 @@ test("A6 修正信息可追溯，且裁尾只报告", async () => {
   const report = result.repairs;
   assert.equal(report.length, 1);
   assert.deepEqual(Object.keys(report[0]).sort(), [
-    "driftRatio", "leadSamples", "name", "outputChannel", "padSamples", "polarity", "polarityFlipped",
-    "resampled", "skipSamples", "source", "sourceChannel", "sourceKey", "trimApplied", "trimSamples",
+    "crossfadeApplied", "driftRatio", "leadSamples", "name", "outputChannel", "padSamples", "polarity",
+    "polarityFlipped", "resampled", "roomToneApplied", "roomToneRms", "skipSamples", "source",
+    "sourceChannel", "sourceKey", "subSampleOffset", "trimApplied", "trimSamples",
   ]);
   assert.equal(report[0].name, "Tr2");
   assert.equal(report[0].source, "TAKE01_Tr2.WAV");

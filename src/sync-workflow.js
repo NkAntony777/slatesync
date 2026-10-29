@@ -1,5 +1,6 @@
 import { polyExportProfile } from "./poly-export-profiles.js";
 import { renderAcceptanceChecklistText } from "./acceptance-checklist.js";
+import { LOUDNESS_TARGETS } from "./loudness.js";
 
 // 合板说明 sidecar 的最终文本。
 //
@@ -18,6 +19,66 @@ export function syncGuideText(result, options = {}) {
   return text ? `${base}\r\n${text}` : base;
 }
 
+/**
+ * 对齐修复的逐轨摘要。
+ * 补白是房间声还是数字静音，必须写出来——两者听感与验收方式完全不同，
+ * 收件人不知道就无从判断那段是不是需要手工再补一次。
+ */
+function repairSummaryLines(result) {
+  return result.repairs.map(repair => {
+    const parts = [];
+    if (repair.leadSamples) parts.push(`晚开机 ${repair.leadSamples} 采样`);
+    if (repair.skipSamples) parts.push(`丢 pre-roll ${repair.skipSamples}`);
+    if (repair.resampled) parts.push(`重采样 ${repair.driftRatio.toFixed(6)}`);
+    if (repair.polarityFlipped) parts.push("极性反接");
+    if (Math.abs(repair.subSampleOffset || 0) >= 0.05) {
+      parts.push(`亚采样偏移 ${repair.subSampleOffset > 0 ? "+" : ""}${repair.subSampleOffset.toFixed(2)} 采样`);
+    }
+    if (repair.padSamples) {
+      const fill = repair.roomToneApplied ? "房间声" : "数字静音";
+      parts.push(`补 ${repair.padSamples} 采样（${fill}）`);
+    }
+    if (repair.crossfadeApplied) parts.push("接缝等功率交叉淡化");
+    if (repair.trimSamples) parts.push(`尾部多出 ${repair.trimSamples} 采样，未裁`);
+    return `· ${repair.name}（输出通道 ${repair.outputChannel}）：${parts.join(" · ") || "仅确认对齐"}`;
+  });
+}
+
+/** 响度读数。程序通道是第一个非 LTC 通道；各通道另有各的读数。 */
+function loudnessSummaryLines(result) {
+  const loudness = result.loudness;
+  if (!loudness) return ["未测量响度。"];
+  const program = loudness.program;
+  if (!program?.supported) return [`未测量：${program?.reason || "该采样率没有标准的 K 加权系数"}`];
+  const format = value => (Number.isFinite(value) ? value.toFixed(1) : "—");
+  const trackName = result.tracks?.[loudness.programChannel - 1]?.name || "";
+  const lines = [
+    `程序通道：第 ${loudness.programChannel} 通道${trackName ? `（${trackName}）` : ""}`,
+    `积分响度：${format(program.integrated)} LUFS`,
+    `最大真峰值：${format(program.truePeak)} dBTP`,
+    `最大瞬时：${format(program.maxMomentary)} LUFS｜最大短时：${format(program.maxShortTerm)} LUFS`,
+    `响度范围：${format(program.range)} LU`,
+  ];
+  const perChannel = loudness.channels
+    .map((channel, index) => (channel?.supported && Number.isFinite(channel.integrated)
+      ? `${index + 1}:${channel.integrated.toFixed(1)}` : null))
+    .filter(Boolean);
+  if (perChannel.length) lines.push(`各通道积分响度（LUFS）：${perChannel.join(" / ")}`);
+  const target = LOUDNESS_TARGETS[loudness.target];
+  if (target && Number.isFinite(program.integrated)) {
+    const delta = program.integrated - target.integrated;
+    lines.push(
+      `交付目标：${target.label}｜实测偏差 ${delta > 0 ? "+" : ""}${delta.toFixed(1)} LU`
+      + (Number.isFinite(program.truePeak)
+        ? `；真峰值 ${program.truePeak > target.truePeak ? "高于" : "低于"}目标上限 ${target.truePeak} dBTP`
+        : ""),
+    );
+  }
+  lines.push("测量依据 ITU-R BS.1770-4 / EBU R128，读数已写入 bext version 2 与 axml。");
+  lines.push("本 Poly 是分轨素材：上面是各条节目轨自己的电平，节目整体响度要在混音阶段再算。");
+  return lines;
+}
+
 export function syncWorkflowText(result, options = {}) {
   const profile = polyExportProfile(result.profile || options.profile || "resolve");
   const lines = [
@@ -30,6 +91,10 @@ export function syncWorkflowText(result, options = {}) {
     ...result.tracks.map(track => `${track.outputChannel}. ${track.name} ← ${track.source} / 源通道 ${track.sourceChannel}`),
     "", "【排除通道】",
     ...(result.excludedTracks.length ? result.excludedTracks.map(track => `${track.source} / 源通道 ${track.sourceChannel}：${track.reason}`) : ["无；未自动删除静音、小电平、L/R 混音或独立麦克风轨"]),
+    "", "【对齐修复】",
+    ...(result.repairs?.length ? repairSummaryLines(result) : ["未开启对齐修复：各分轨按原样写入，未做偏移、漂移与补白修正。"]),
+    "", "【响度（EBU R128 / ITU-R BS.1770-4）】",
+    ...loudnessSummaryLines(result),
     "", "【多余音轨的三个不同来源】",
     "1. LTC 技术轨：清洁方案只移除已确认的 LTC 通道，不把空通道留在 Poly 内。未做 LTC 检测时不能靠文件名猜测。",
     "2. 录音机 L/R 混音与独立麦克风 ISO：可能是相同声音的不同版本，不等于文件损坏；不要全部同时叠加播放。需要裁减时显式选择输出通道。",

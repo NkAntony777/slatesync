@@ -344,7 +344,7 @@ test("poly output names are stable and sidecars do not collide with the poly or 
   assert.equal(polyOutputNameFor("take 01 (raw)"), "take_01_raw_Poly.WAV");
   // 与改动前的 `result.name.replace(/\.wav$/i, "_SyncRef.WAV")` 保持一致，不在这里改命名
   assert.equal(polyReferenceOutputNameFor("take01_Poly.WAV"), "take01_Poly_SyncRef.WAV");
-  assert.deepEqual(polySidecarNamesFor("take01_Poly.WAV"), ["take01_Poly_合板说明.txt", "take01_Poly_channels.json"]);
+  assert.deepEqual(polySidecarNamesFor("take01_Poly.WAV"), ["take01_Poly_合板说明.txt", "take01_Poly_channels.json", "take01_Poly.fcpxml"]);
   for (const name of polySidecarNamesFor("take01_Poly.WAV")) {
     assert.ok(!name.toLowerCase().endsWith(".wav"), "边车文件不能以 .wav 结尾，否则会被当成素材重新导入");
     assert.ok(!name.toLowerCase().endsWith(".bak"));
@@ -432,9 +432,11 @@ test("without IndexedDB the directory store degrades to per-export prompts inste
 // ---------------------------------------------------------------------------
 // 对齐修复（时长 / 偏移 / 时钟漂移）
 //
-// 契约：options.repair = { enabled: boolean, referenceKey: string }，
+// 契约：options.repair = { enabled: boolean, referenceKey: string,
+//                              crossfade: { enabled: boolean }, roomTone: { enabled: boolean } },
 // referenceKey 是 sourceTrackKey（"文件名:声道下标"），空串 = 自动。
 // 界面不判断哪个 take 需要修，默认必须是不开。
+// 交叉淡化与房间声补白是"对齐修复"的细化项：主开关关着时它们必须无效。
 // ---------------------------------------------------------------------------
 
 test("repair is off by default, and the engine still gets an explicit enabled:false", async () => {
@@ -445,7 +447,12 @@ test("repair is off by default, and the engine still gets an explicit enabled:fa
   const options = buildExportOptions({ profileId: "resolve", choices, checkedKeys: resolveCheckedKeys(choices, "resolve"), groupCount: 1 });
   assert.equal(options.repair.enabled, false, "修复必须默认关闭，不能改任何现有默认行为");
   assert.equal(options.repair.referenceKey, "");
-  assert.deepEqual(Object.keys(options.repair).sort(), ["enabled", "referenceKey"]);
+  assert.deepEqual(Object.keys(options.repair).sort(), ["crossfade", "enabled", "loudness", "referenceKey", "roomTone", "waveform"]);
+  // 响度默认开启：只测量、只写元数据，不改音频。
+  assert.equal(options.repair.loudness.enabled, true);
+  assert.equal(options.repair.loudness.target, "r128");
+  assert.equal(options.repair.crossfade.enabled, false, "交叉淡化必须默认关闭");
+  assert.equal(options.repair.roomTone.enabled, false, "房间声补白必须默认关闭");
 });
 
 test("checking repair turns it on and leaves the reference track on 自动", async () => {
@@ -497,7 +504,71 @@ test("an empty reference key is legal, and a stale one is passed through instead
   assert.equal(stale.repair.referenceKey, "别的目录/没了.wav:3");
   // 没勾修复时这个 key 无意义，但照样带过去，省掉一层条件分支
   const off = buildExportOptions({ profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, repairKey: "别的目录/没了.wav:3" });
-  assert.deepEqual(off.repair, { enabled: false, referenceKey: "别的目录/没了.wav:3" });
+  assert.deepEqual(off.repair, {
+    enabled: false, referenceKey: "别的目录/没了.wav:3",
+    crossfade: { enabled: false }, roomTone: { enabled: false, sourceKey: "" },
+    // 响度是独立的：它不属于"对齐修复"，修不修都得量。
+    loudness: { enabled: true, target: "r128" },
+    waveform: { enabled: false, referenceKey: "" },
+  });
+});
+
+test("the two repair refinements only take effect together with the repair switch", async () => {
+  const records = await take("take30", { tracks: 2 });
+  const groups = combineEligibleGroupsFor(records, detectTakeGroupKeys(records));
+  const choices = buildExportChoices(groups);
+  const checked = resolveCheckedKeys(choices, "resolve");
+  const build = extra => buildExportOptions({
+    profileId: "resolve", choices, checkedKeys: checked, groupCount: 1, ...extra,
+  });
+
+  // 主开关关着：即使把细化项勾上也不生效——补白都没发生，何来接缝与房间声。
+  const off = build({ crossfadeEnabled: true, roomToneEnabled: true });
+  assert.equal(off.repair.enabled, false);
+  assert.equal(off.repair.crossfade.enabled, false, "主开关关着时交叉淡化必须无效");
+  assert.equal(off.repair.roomTone.enabled, false, "主开关关着时房间声补白必须无效");
+
+  // 主开关开着：两个细化项各自独立，默认仍然是不开。
+  const on = build({ repairEnabled: true });
+  assert.equal(on.repair.enabled, true);
+  assert.equal(on.repair.crossfade.enabled, false);
+  assert.equal(on.repair.roomTone.enabled, false);
+
+  const both = build({ repairEnabled: true, crossfadeEnabled: true, roomToneEnabled: true });
+  assert.equal(both.repair.crossfade.enabled, true);
+  assert.equal(both.repair.roomTone.enabled, true);
+
+  // 只勾一个也要各自独立生效。
+  const onlyTone = build({ repairEnabled: true, roomToneEnabled: true });
+  assert.equal(onlyTone.repair.crossfade.enabled, false);
+  assert.equal(onlyTone.repair.roomTone.enabled, true);
+  // 房间声来源默认是空串 = 各轨各找自己最安静的一段。
+  assert.equal(onlyTone.repair.roomTone.sourceKey, "");
+
+  // 指定来源：原样传给引擎，用的是与修复基准轨同一套 sourceTrackKey。
+  const shared = build({ repairEnabled: true, roomToneEnabled: true, roomToneSourceKey: " take31_Tr1.wav:0 " });
+  assert.equal(shared.repair.roomTone.sourceKey, "take31_Tr1.wav:0");
+  // 波形对齐：默认关闭；参考声键原样传给引擎。
+  // 它挂在"对齐修复"总开关下——没有对齐就没有波形对齐这回事。
+  const waveform = build({ repairEnabled: true, waveformEnabled: true, waveformReferenceKey: "video:CAM01.WAV:0" });
+  assert.equal(waveform.repair.waveform.enabled, true);
+  assert.equal(waveform.repair.waveform.referenceKey, "video:CAM01.WAV:0");
+  // 总开关关着时，波形对齐必须无效。
+  assert.equal(build({ waveformEnabled: true }).repair.waveform.enabled, false);
+  assert.equal(build({ repairEnabled: true, waveformReferenceKey: "  " }).repair.waveform.referenceKey, "");
+
+  // 响度目标：可选，默认 r128；畸形值收敛成 r128。
+  const loudnessTarget = build({ loudnessTarget: "a85" });
+  assert.equal(loudnessTarget.repair.loudness.target, "a85");
+  assert.equal(build({ loudnessTarget: "  " }).repair.loudness.target, "r128");
+  assert.equal(build({ loudnessTarget: undefined }).repair.loudness.target, "r128");
+  assert.equal(build({ loudnessEnabled: false }).repair.loudness.enabled, false);
+
+  // 畸形来源收敛成空串，不抛错也不把脏值带进引擎。
+  for (const sourceKey of [undefined, null, 123, {}, []]) {
+    const coerced = build({ repairEnabled: true, roomToneEnabled: true, roomToneSourceKey: sourceKey });
+    assert.equal(coerced.repair.roomTone.sourceKey, "", `${String(sourceKey)} 应该被收敛成空串`);
+  }
 });
 
 test("malformed repair input is coerced to the contract shape instead of throwing", async () => {

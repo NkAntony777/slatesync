@@ -76,7 +76,7 @@ function describeExclusions(list) {
 
 function sidecarNames(result) {
   const stem = String(result.name ?? "").replace(/\.wav$/i, "");
-  return [`${stem}_合板说明.txt`, `${stem}_channels.json`];
+  return [`${stem}_合板说明.txt`, `${stem}_channels.json`, `${stem}.fcpxml`];
 }
 
 // 2026-10-05 DaVinci Resolve 20.3.3.10 本机实测（合成素材，不是厂商认证）。
@@ -275,6 +275,10 @@ export function buildAcceptanceChecklist(result, options = {}) {
     reference: profile.reference,
     items,
     summary,
+    // 交付自检的结果：把写出去的 Poly 读回来核过的那一份。
+    // 它不是 14 条验收项之一——那 14 条核的是"打算怎么做"，
+    // 这一份核的是"文件确实长什么样"。
+    delivery: options.deliveryReport ?? null,
   };
 }
 
@@ -296,6 +300,12 @@ export function renderAcceptanceChecklistText(checklist, options = {}) {
     `共 ${summary.total} 项：自动确认通过 ${summary.pass}｜发现问题 ${summary.fail}｜需人工确认 ${summary.manual}｜本方案不适用 ${summary.na}`,
     "",
   ];
+  if (checklist.delivery?.checks?.length) {
+    lines.push("", "【交付自检：把写出去的 Poly 读回来核过】");
+    for (const check of checklist.delivery.checks) {
+      lines.push(`${STATE_MARKS[check.state] ?? " "} ${check.label} —— ${check.detail}`);
+    }
+  }
   for (const entry of checklist.items) {
     lines.push(`${STATE_MARKS[entry.state]} ${entry.label}${STATE_TAGS[entry.state]} —— ${entry.detail}`);
     if (entry.guide) lines.push(`    → ${entry.guide}`);

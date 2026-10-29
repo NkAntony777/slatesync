@@ -252,6 +252,45 @@
                 <select id="exportRepairReferenceInput" aria-label="修复基准轨"></select>
               </label>
               <p id="exportRepairReferenceHint" class="rail-hint"></p>
+              <div class="export-repair-extra">
+                <label class="check-row" title="在内容与补白的接缝处做等功率交叉淡化：接缝两侧混合时感知响度恒定，不会像等增益那样在中点留下可闻的功率凹陷">
+                  <input id="exportRepairCrossfadeInput" type="checkbox">
+                  <span>接缝等功率交叉淡化</span>
+                </label>
+                <label class="check-row" title="用该分轨自己最安静的一段当房间声填补补白，而不是补数字静音——人耳把绝对静音读成「掉轨」，不是「安静」。找不到可信片段时如实报告并退回静音，绝不用勉强的素材凑数">
+                  <input id="exportRepairRoomToneInput" type="checkbox">
+                  <span>房间声补白（取代数字静音）</span>
+                </label>
+                <label class="field">
+                  房间声来源
+                  <select id="exportRoomToneSourceInput" aria-label="房间声来源"></select>
+                </label>
+                <p id="exportRoomToneSourceHint" class="rail-hint"></p>
+              </div>
+            </div>
+
+            <div class="export-reference">
+              <label class="check-row" title="用波形把分轨对到参考声（通常是摄影机原始声）。适合 LTC 不足以定位、或跨场次对齐；置信度不够就不采用，照旧按原测量对齐">
+                <input id="exportWaveformEnabledInput" type="checkbox">
+                <span>波形对齐（补充 LTC）</span>
+              </label>
+              <label class="field">
+                波形参考声
+                <select id="exportWaveformReferenceInput" aria-label="波形参考声"></select>
+              </label>
+              <p id="exportWaveformHint" class="rail-hint"></p>
+            </div>
+
+            <div class="export-reference">
+              <label class="check-row" title="按 ITU-R BS.1770-4 测量积分响度、真峰值与响度范围，写进 BWF 的 bext version 2 与 axml。只测量、只写元数据，不改动任何采样；关掉则完全不量">
+                <input id="exportLoudnessEnabledInput" type="checkbox" checked>
+                <span>BWF 响度元数据（EBU R128）</span>
+              </label>
+              <label class="field">
+                交付目标响度
+                <select id="exportLoudnessTargetInput" aria-label="交付目标响度"></select>
+              </label>
+              <p id="exportLoudnessTargetHint" class="rail-hint"></p>
             </div>
 
             <div class="export-directory">
@@ -567,6 +606,7 @@
       buildExportOptions,
       buildFpsOverrideViewModel,
       buildRepairReferenceOptions,
+      buildRoomToneSourceOptions,
       buildTakeHealthViewModel,
       commonVideoFpsValue,
       confirmOverwriteOutputs,
@@ -580,6 +620,7 @@
       summarizeExportSelection,
       takeHealthFindingsForChecklist,
     } from "./src/confirm-flows.js";
+    import { LOUDNESS_TARGETS } from "./src/loudness.js";
     import { createTimeReferenceWriteController, saveAsNameFor } from "./src/time-reference-write-controller.js";
     import { createUiStateController } from "./src/ui-state.js";
     import {
@@ -716,6 +757,16 @@
       exportRepairEnabledInput: document.getElementById("exportRepairEnabledInput"),
       exportRepairReferenceInput: document.getElementById("exportRepairReferenceInput"),
       exportRepairReferenceHint: document.getElementById("exportRepairReferenceHint"),
+      exportRepairCrossfadeInput: document.getElementById("exportRepairCrossfadeInput"),
+      exportRepairRoomToneInput: document.getElementById("exportRepairRoomToneInput"),
+      exportRoomToneSourceInput: document.getElementById("exportRoomToneSourceInput"),
+      exportRoomToneSourceHint: document.getElementById("exportRoomToneSourceHint"),
+      exportWaveformEnabledInput: document.getElementById("exportWaveformEnabledInput"),
+  exportWaveformReferenceInput: document.getElementById("exportWaveformReferenceInput"),
+  exportWaveformHint: document.getElementById("exportWaveformHint"),
+  exportLoudnessEnabledInput: document.getElementById("exportLoudnessEnabledInput"),
+      exportLoudnessTargetInput: document.getElementById("exportLoudnessTargetInput"),
+      exportLoudnessTargetHint: document.getElementById("exportLoudnessTargetHint"),
       exportDirectoryBtn: document.getElementById("exportDirectoryBtn"),
       exportDirectoryLabel: document.getElementById("exportDirectoryLabel"),
       exportRememberDirectoryInput: document.getElementById("exportRememberDirectoryInput"),
@@ -964,6 +1015,9 @@
     let exportReferenceKey = "";
     // 修复基准轨的选择：候选变化后由 buildRepairReferenceOptions 判它还能不能用。
     let exportRepairReferenceKey = "";
+  let exportRoomToneSourceKey = "";
+  let exportLoudnessTarget = "r128";
+  let exportWaveformReferenceKey = "";
     let exportChoices = { takes: [], allKeys: [], confirmedLtcKeys: new Set() };
     let exportGroups = [];
     const outputDirectory = createRememberedDirectoryStore();
@@ -1057,6 +1111,82 @@
       // 留一个能点但无效的控件只会让人以为它生效了。
       els.exportRepairReferenceInput.disabled = !enabled;
       els.exportRepairReferenceHint.textContent = enabled ? model.hintText : "勾选上面的「对齐修复」后才能指定基准轨；不勾就是原样合并。";
+      // 两个细化项跟着总开关走：主开关关着时它们没有意义，
+      // 留一个能点但无效的控件只会让人以为它生效了。
+      els.exportRepairCrossfadeInput.disabled = !enabled;
+      els.exportRepairRoomToneInput.disabled = !enabled;
+      // 房间声来源只在"房间声补白"勾上时才有意义。
+      const toneEnabled = enabled && els.exportRepairRoomToneInput.checked;
+      const toneModel = buildRoomToneSourceOptions({
+        choices: exportChoices,
+        profileId: exportProfileId(),
+        checkedKeys: checkedKeysForPanel(),
+        value: exportRoomToneSourceKey,
+      });
+      exportRoomToneSourceKey = toneModel.selected;
+      els.exportRoomToneSourceInput.innerHTML = toneModel.options
+        .map(option => `<option value="${escapeHtml(option.value)}"${option.value === toneModel.selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+        .join("");
+      els.exportRoomToneSourceInput.disabled = !toneEnabled;
+      els.exportRoomToneSourceHint.textContent = toneEnabled
+        ? toneModel.hintText
+        : "勾选上面的「房间声补白」后才能指定房间声来源。";
+    }
+
+    // 波形参考声的候选项：摄影机原始声（导入的视频解出来的音轨）与各条分轨。
+    // 分轨只列第 1 通道——参考声是"某个位置的声音"，多列几个通道没有意义。
+    function waveformReferenceCandidates() {
+      const candidates = [];
+      for (const record of records) {
+        if (record._meta) continue;
+        if (!record.channels) continue;
+        if (record._video) {
+          candidates.push({
+            key: "video:" + recordKey(record) + ":0",
+            label: "摄影机原始声 · " + record.name,
+            record,
+            channelIndex: 0,
+          });
+          continue;
+        }
+        candidates.push({
+          key: "wav:" + recordKey(record) + ":0",
+          label: "分轨 · " + record.name,
+          record,
+          channelIndex: 0,
+        });
+      }
+      return candidates;
+    }
+
+    function renderExportWaveform() {
+      const enabled = Boolean(els.exportWaveformEnabledInput.checked);
+      const candidates = waveformReferenceCandidates();
+      const selected = candidates.find(item => item.key === exportWaveformReferenceKey) || candidates[0] || null;
+      exportWaveformReferenceKey = selected ? selected.key : "";
+      els.exportWaveformReferenceInput.innerHTML = candidates.length
+        ? candidates.map(item => `<option value="${escapeHtml(item.key)}"${item.key === exportWaveformReferenceKey ? " selected" : ""}>${escapeHtml(item.label)}</option>`).join("")
+        : '<option value="">（没有可用的参考声）</option>';
+      els.exportWaveformReferenceInput.disabled = !enabled || !candidates.length;
+      els.exportWaveformHint.textContent = !enabled
+        ? "关掉就只用原来的对齐方式。"
+        : !candidates.length
+          ? "需要先导入摄影机视频或分轨才能当参考声。"
+          : "逐轨试匹配：置信度不够就不采用，照旧按原测量对齐，并在日志里说明原因。";
+    }
+
+    function renderExportLoudness() {
+      const enabled = Boolean(els.exportLoudnessEnabledInput.checked);
+      const targets = Object.values(LOUDNESS_TARGETS);
+      els.exportLoudnessTargetInput.innerHTML = targets
+        .map(target => `<option value="${escapeHtml(target.id)}"${target.id === exportLoudnessTarget ? " selected" : ""}>${escapeHtml(target.label)}</option>`)
+        .join("");
+      els.exportLoudnessTargetInput.disabled = !enabled;
+      const target = LOUDNESS_TARGETS[exportLoudnessTarget];
+      els.exportLoudnessTargetHint.textContent = !enabled
+        ? "关掉就不测量，文件里不会有任何响度字段。"
+        : `只测量、只写元数据，不改音频。目标 ${target?.label ?? "未选择"}；`
+          + "不同目的地的数字不能互相换算（门控方式不同），工具只报实测值与偏差。";
     }
 
     function refreshExportOptions(groups = combineEligibleGroups()) {
@@ -1066,6 +1196,8 @@
       renderExportChannels();
       renderExportReference();
       renderExportRepair();
+      renderExportWaveform();
+      renderExportLoudness();
       // 体检结论依赖"哪些通道会被剔除"，所以方案/通道一变就得跟着重算。
       // 这同时覆盖了 LTC 提取完成与时码预览变化两条路径——它们都会走到这里。
       renderTakeHealthPanel();
@@ -1084,6 +1216,14 @@
         repairEnabled: Boolean(els.exportRepairEnabledInput.checked),
         // 空串是合法值（=自动基准轨），不要在这里兜成别的轨
         repairKey: els.exportRepairReferenceInput.value || "",
+        // 两项都默认不勾：凡是会改动音频内容的步骤，都必须由用户显式选择。
+        crossfadeEnabled: Boolean(els.exportRepairCrossfadeInput.checked),
+        roomToneEnabled: Boolean(els.exportRepairRoomToneInput.checked),
+        roomToneSourceKey: els.exportRoomToneSourceInput.value || "",
+        loudnessEnabled: Boolean(els.exportLoudnessEnabledInput.checked),
+        loudnessTarget: els.exportLoudnessTargetInput.value || "r128",
+        waveformEnabled: Boolean(els.exportWaveformEnabledInput.checked),
+        waveformReferenceKey: els.exportWaveformReferenceInput.value || "",
       });
       return { ...options, channelSummary: summarizeExportSelection(exportChoices, profileId, checked) };
     }
@@ -1397,6 +1537,11 @@
       getTakeHealthFindings: takeKey => (takeHealthView?.available
         ? takeHealthFindingsForChecklist(takeHealthView, takeKey)
         : undefined),
+      // 波形对齐的参考声：按界面选中的候选项直接给控制器。
+      getWaveformReference: () => {
+        const candidate = waveformReferenceCandidates().find(item => item.key === exportWaveformReferenceKey);
+        return candidate ? { record: candidate.record, channelIndex: candidate.channelIndex } : null;
+      },
       showAcceptanceChecklist,
       setCombinedPolyKeys: keys => { combinedPolyKeys = keys; },
       setState,
@@ -1718,6 +1863,30 @@
 
     els.exportRepairReferenceInput.addEventListener("change", () => {
       exportRepairReferenceKey = els.exportRepairReferenceInput.value || "";
+    });
+
+    els.exportRepairRoomToneInput.addEventListener("change", () => {
+      renderExportRepair();
+    });
+
+    els.exportRoomToneSourceInput.addEventListener("change", () => {
+      exportRoomToneSourceKey = els.exportRoomToneSourceInput.value || "";
+    });
+
+    els.exportWaveformEnabledInput.addEventListener("change", () => {
+      renderExportWaveform();
+    });
+
+    els.exportWaveformReferenceInput.addEventListener("change", () => {
+      exportWaveformReferenceKey = els.exportWaveformReferenceInput.value || "";
+    });
+
+    els.exportLoudnessEnabledInput.addEventListener("change", () => {
+      renderExportLoudness();
+    });
+
+    els.exportLoudnessTargetInput.addEventListener("change", () => {
+      exportLoudnessTarget = els.exportLoudnessTargetInput.value || "r128";
     });
 
     // 合并前体检：筛选、收起。

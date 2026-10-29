@@ -389,9 +389,50 @@ test("成功 take 的字节、sidecar 与清单在隔离前后完全一致", asy
       assert.deepEqual([...broken.readBytes(fileName)], [...file.bytes], `${fileName} 的字节必须与全成功时一致`);
       continue;
     }
+    if (fileName.startsWith("_生产总账")) {
+      // 生产总账是**跨 take** 的产物：这一次跑坏了 take02，总账本来就该不一样。
+      // 它要单独验，见下面的断言。
+      continue;
+    }
     assert.equal(stripStamp(decode(broken.readBytes(fileName))), stripStamp(decode(file.bytes)),
       `${fileName} 的内容必须与全成功时一致（除时间戳外）`);
   }
+});
+
+test("生产总账记下没交成的 take 和原因，交成的 take 逐条对得上", async () => {
+  const records = [
+    ...(await take("take01")),
+    ...(await take("take02")),
+    ...(await take("take03")),
+  ];
+  const directory = fakeDirectory({ failFor: ["take02_Poly.WAV"] });
+  await (await harness({ records, directory })).controller.combinePolyFiles();
+
+  const manifest = JSON.parse(decode(directory.readBytes("_生产总账.json")));
+  assert.equal(manifest.summary.takes, 3);
+  assert.equal(manifest.summary.delivered, 2);
+  assert.equal(manifest.summary.skipped, 1);
+  // 没交成的 take 必须在账上，而且要说清为什么没交——总账的价值就在这儿。
+  const skipped = manifest.takes.filter(item => !item.delivered);
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0].takeKey, /take02/);
+  assert.equal(skipped[0].status, "skipped");
+  assert.match(skipped[0].reasons.join("；"), /磁盘空间不足/);
+  // 问题清单里也得有一条对应它，收件人才知道该找谁。
+  assert.ok(manifest.summary.problems.some(problem => problem.takeKey === skipped[0].takeKey && /磁盘空间不足/.test(problem.message)));
+  // 交成的 take 逐条对得上：输出名、通道数、时长都在账上。
+  const delivered = manifest.takes.filter(item => item.delivered);
+  assert.deepEqual(delivered.map(item => item.outputName).sort(), ["take01_Poly.WAV", "take03_Poly.WAV"]);
+  for (const item of delivered) {
+    assert.equal(item.status, "delivered");
+    assert.ok(item.channels > 0);
+    assert.ok(item.durationSamples);
+    assert.deepEqual(item.reasons, []);
+  }
+  // CSV 也要在：给不想开 JSON 的人看的总账，不能只有 JSON 一份。
+  const csv = decode(directory.readBytes("_生产总账.csv"));
+  assert.match(csv, /take02/);
+  assert.match(csv, /take01_Poly\.WAV/);
 });
 
 // ============================================================ 预校验隔离
@@ -521,7 +562,10 @@ test("SyncRef / 同步说明这类既有 WARN 不会被误记成 take 失败", a
   const records = [...(await take("take01")), ...(await take("take02"))];
   // sidecar 写不进去但主 Poly 已落盘：按既有语义这是 WARN，不是 take 失败。
   const directory = fakeDirectory({
-    failFor: ["take01_Poly_合板说明.txt", "take01_Poly_channels.json", "take02_Poly_合板说明.txt", "take02_Poly_channels.json"],
+    failFor: [
+    "take01_Poly_合板说明.txt", "take01_Poly_channels.json", "take01_Poly.fcpxml",
+    "take02_Poly_合板说明.txt", "take02_Poly_channels.json", "take02_Poly.fcpxml",
+  ],
   });
   const { controller, els, logs } = await harness({ records, directory });
 

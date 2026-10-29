@@ -80,12 +80,13 @@ const NEW_IDS = [
   "fpsOverrideAddBtn", "fpsOverrideClearAllBtn", "fpsOverrideHint",
   "takeHealthSection", "takeHealthSummary", "takeHealthBody", "takeHealthErrorsOnlyInput",
   "acceptanceSection", "acceptanceSummary", "acceptanceBody", "acceptanceCloseBtn",
+  "exportWaveformEnabledInput", "exportWaveformReferenceInput", "exportWaveformHint",
 ];
 const missingIds = await page.evaluate(
   ids => ids.filter(id => !document.getElementById(id)),
   NEW_IDS,
 );
-check("新 UI 的 36 个 DOM 节点全部存在", missingIds.length === 0,
+check(`新 UI 的 ${NEW_IDS.length} 个 DOM 节点全部存在`, missingIds.length === 0,
   missingIds.length ? `缺失 ${missingIds.length} 个：${missingIds.join(", ")}` : `共 ${NEW_IDS.length} 个`);
 
 // 2. 输出方案必须是全部 5 个，而不再是写死的 resolve。
@@ -176,13 +177,48 @@ check("帧率来源面板可见且提供 per-take 覆盖入口",
   fpsState.sourceCardOpen && fpsState.addOptions > 0,
   `summary="${fpsState.summary}"，可覆盖 take ${fpsState.addOptions} 个`);
 
-// 8. 备份面板：默认开启，并展示成本预估。
+// 8. 备份面板：默认关闭，并把两种状态都锁住。
+//
+// 这条断言以前写的是"默认开启"，那是上一版产品的行为。产品按反馈改成
+// "默认不再自动备份、改为弹窗强制提醒自行备份"之后，界面文案、README 与写入控制器
+// 都跟着改了，只有这条断言还停在旧行为上，验证脚本就长期红着——而且红在一个
+// 早已不成立的前提上，看久了会让人以为备份功能坏了。
+//
+// 现在按当前行为锁：默认不勾、摘要说明这是默认且会强制提醒；勾上后摘要换成备份
+// 成本预估；再取消又回到默认文案。顺手确认开关状态能还原，不给后面的流程留残留。
 const backupState = await page.evaluate(() => ({
   checked: document.getElementById("backupBeforeWriteInput")?.checked,
   summary: (document.getElementById("backupPlanSummary")?.textContent || "").trim(),
 }));
-check("写入备份默认开启且显示成本预估", backupState.checked === true && backupState.summary.length > 0,
+check("写入备份默认关闭并说明会强制提醒",
+  backupState.checked === false && /默认/.test(backupState.summary) && /提醒/.test(backupState.summary),
   `checked=${backupState.checked}，summary="${backupState.summary}"`);
+
+const backupOn = await page.evaluate(() => {
+  const input = document.getElementById("backupBeforeWriteInput");
+  input.checked = true;
+  input.dispatchEvent(new Event("change"));
+  return {
+    checked: input.checked,
+    summary: (document.getElementById("backupPlanSummary")?.textContent || "").trim(),
+  };
+});
+check("勾上自动备份后摘要换成备份成本预估",
+  backupOn.checked === true && !/已关闭/.test(backupOn.summary) && backupOn.summary.length > 0,
+  `checked=${backupOn.checked}，summary="${backupOn.summary}"`);
+
+const backupRestored = await page.evaluate(() => {
+  const input = document.getElementById("backupBeforeWriteInput");
+  input.checked = false;
+  input.dispatchEvent(new Event("change"));
+  return {
+    checked: input.checked,
+    summary: (document.getElementById("backupPlanSummary")?.textContent || "").trim(),
+  };
+});
+check("取消勾选后回到默认关闭文案",
+  backupRestored.checked === false && /已关闭/.test(backupRestored.summary),
+  `checked=${backupRestored.checked}，summary="${backupRestored.summary}"`);
 
 // 9. 跑一次 LTC 提取，体检面板应当出现（原来这一步只产出 LTC 诊断）。
 await page.selectOption("#fpsInput", "25").catch(() => {});
@@ -236,6 +272,47 @@ const acceptanceBefore = await page.evaluate(() => {
   return Boolean(el) && (el.hidden || getComputedStyle(el).display === "none");
 });
 check("验收清单面板在导出前保持隐藏（不空展示）", acceptanceBefore);
+
+// 12. 波形对齐（LTC 之外的第二条对齐路径）：默认关闭，勾上才给参考声候选。
+// 默认关闭是铁律——新功能默认不动既有行为，必须用户显式勾选才生效。
+const waveformOff = await page.evaluate(() => {
+  const enabled = document.getElementById("exportWaveformEnabledInput");
+  const reference = document.getElementById("exportWaveformReferenceInput");
+  return {
+    checked: enabled?.checked,
+    disabled: reference?.disabled,
+    hint: (document.getElementById("exportWaveformHint")?.textContent || "").trim(),
+  };
+});
+check("波形对齐默认关闭，参考声下拉不可选",
+  waveformOff.checked === false && waveformOff.disabled === true,
+  `checked=${waveformOff.checked}，disabled=${waveformOff.disabled}，hint="${waveformOff.hint}"`);
+
+const waveformOn = await page.evaluate(() => {
+  const enabled = document.getElementById("exportWaveformEnabledInput");
+  enabled.checked = true;
+  enabled.dispatchEvent(new Event("change", { bubbles: true }));
+  const reference = document.getElementById("exportWaveformReferenceInput");
+  return {
+    disabled: reference?.disabled,
+    options: Array.from(reference?.options || []).map(o => o.value),
+    hint: (document.getElementById("exportWaveformHint")?.textContent || "").trim(),
+  };
+});
+check("勾上波形对齐后列出参考声候选并可用",
+  waveformOn.disabled === false && waveformOn.options.length > 0 && /置信度/.test(waveformOn.hint),
+  `候选项 ${waveformOn.options.length} 个：${waveformOn.options.join(" | ")}`);
+
+const waveformRestored = await page.evaluate(() => {
+  const enabled = document.getElementById("exportWaveformEnabledInput");
+  enabled.checked = false;
+  enabled.dispatchEvent(new Event("change", { bubbles: true }));
+  const reference = document.getElementById("exportWaveformReferenceInput");
+  return { checked: enabled.checked, disabled: reference?.disabled };
+});
+check("取消勾选后回到默认关闭状态",
+  waveformRestored.checked === false && waveformRestored.disabled === true,
+  `checked=${waveformRestored.checked}，disabled=${waveformRestored.disabled}`);
 
 check("无未捕获异常", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
 check("无控制台 error", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));

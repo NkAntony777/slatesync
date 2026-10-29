@@ -6,8 +6,12 @@ import {
 } from "./wave-combine.js";
 import { POLY_EXPORT_PROFILES, applyPolyExportPolicy, polyExportProfile } from "./poly-export-profiles.js";
 import { planRepairsForTracks } from "./repair-planner.js";
+import { ROOM_TONE_DEFAULTS } from "./room-tone.js";
 import { syncGuideText, syncPackageManifest } from "./sync-workflow.js";
+import { fcpxmlTextForPoly } from "./fcpxml.js";
 import { buildAcceptanceChecklist } from "./acceptance-checklist.js";
+import { checkWrittenPoly } from "./delivery-check.js";
+import { buildProductionManifest, productionManifestCsv } from "./production-manifest.js";
 import { takeHealthScopeForCombine } from "./confirm-flows.js";
 import { recordKey, shortGroupLabel } from "./grouping.js";
 
@@ -23,7 +27,7 @@ export function polyReferenceOutputNameFor(outputName) {
 
 export function polySidecarNamesFor(outputName) {
   const stem = String(outputName || "").replace(/\.wav$/i, "");
-  return [`${stem}_合板说明.txt`, `${stem}_channels.json`];
+  return [`${stem}_合板说明.txt`, `${stem}_channels.json`, `${stem}.fcpxml`];
 }
 
 /** 计划要写的文件名里，哪些已经存在于目标目录（按文件系统大小写不敏感比对）。 */
@@ -142,6 +146,9 @@ export function createPolyCombineController({
   getTakeHealthView,
   // 可选：() => 该 take 的体检 findings，供验收清单的 take-health-clear 项使用。
   getTakeHealthFindings,
+  // 可选：() => 波形对齐的参考声轨 { record, channelIndex }。
+  // 返回 null 表示没有参考声，波形对齐这条路径就不走。
+  getWaveformReference,
   // 可选：合并完成后弹出可勾选的验收面板。返回的 checklist 已带 needsHuman 统计。
   showAcceptanceChecklist,
   setCombinedPolyKeys,
@@ -187,10 +194,71 @@ export function createPolyCombineController({
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  /**
+   * 把写出去的 Poly 读回来核一遍。
+   *
+   * 只读文件头：一条一小时的 Poly 有几个 GB，整读回来在浏览器里立不住。
+   * 头里就有 bext / axml / chna / fmt 与 data 段声明的长度，够核了。
+   */
+  async function verifyWrittenPoly(handle, result, expected) {
+    try {
+      const file = await handle.getFile();
+      const head = new Uint8Array(await file.slice(0, 4 * 1024 * 1024).arrayBuffer());
+      return checkWrittenPoly(head, { ...expected, headerOnly: true });
+    } catch (error) {
+      log(`Delivery CHECK WARN: ${result.name}: ${error?.message || error}；自检没做成`);
+      return null;
+    }
+  }
+
+  /** 体检 findings 汇总成 { errors, warns, infos }。findings 的形状各版本不完全一样，认不出来就返回 null。 */
+  function summarizeHealth(findings) {
+    const list = Array.isArray(findings)
+      ? findings
+      : (Array.isArray(findings?.findings) ? findings.findings : null);
+    if (!list) return null;
+    const count = level => list.filter(item =>
+      String(item?.severity || item?.level || "").toLowerCase() === level).length;
+    return { errors: count("error"), warns: count("warn"), infos: count("info") };
+  }
+
+  /** 没交成的 take 在总账里长什么样。 */
+  function manifestFailureEntry(takeKey, reason) {
+    return {
+      takeKey: String(takeKey || ""),
+      takeLabel: shortGroupLabel(takeKey),
+      outputName: polyOutputNameFor(takeKey),
+      delivered: false,
+      reasons: [String(reason || "未知原因")],
+      sidecars: [],
+    };
+  }
+
+  /** 生产总账的两个文件：JSON 给机器，CSV 给不想开 JSON 的人。 */
+  async function writeProductionManifestFiles(directory, manifest) {
+    const stem = "_生产总账";
+    const entries = [
+      [`${stem}.json`, JSON.stringify(manifest, null, 2)],
+      [`${stem}.csv`, "\uFEFF" + productionManifestCsv(manifest)],
+    ];
+    for (const [name, text] of entries) {
+      const handle = await directory.getFileHandle(name, { create: true });
+      const writable = await handle.createWritable();
+      try { await writable.write(new Blob([text], { type: "text/plain;charset=utf-8" })); await writable.close(); }
+      catch (error) { await writable.abort?.().catch(() => {}); throw error; }
+    }
+  }
+
   async function saveSidecars(directory, result, checklist = null) {
-    const [guideName, manifestName] = polySidecarNamesFor(result.name);
+    const [guideName, manifestName, fcpxmlName] = polySidecarNamesFor(result.name);
     const options = { fpsValue: getFpsValue?.(), referenceName: result.referenceName, checklist };
-    for (const [name, text] of [[guideName, "\uFEFF" + syncGuideText(result, options)], [manifestName, JSON.stringify(syncPackageManifest(result, options), null, 2)]]) {
+    // FCPXML：交给剪辑软件的最小通路。自己不写 AAF——见 src/fcpxml.js 的理由。
+    const entries = [
+      [guideName, "\uFEFF" + syncGuideText(result, options)],
+      [manifestName, JSON.stringify(syncPackageManifest(result, options), null, 2)],
+      [fcpxmlName, fcpxmlTextForPoly(result, { fpsValue: options.fpsValue, sourceName: result.name })],
+    ];
+    for (const [name, text] of entries) {
       const handle = await directory.getFileHandle(name, { create: true });
       const writable = await handle.createWritable();
       try { await writable.write(new Blob([text], { type: "text/plain;charset=utf-8" })); await writable.close(); }
@@ -325,7 +393,7 @@ export function createPolyCombineController({
     const outputName = polyOutputNameFor(key);
     const handle = await directory.getFileHandle(outputName, { create: true });
     const writable = await handle.createWritable();
-    return writeCombinedPolyToWritable(key, groupRecords, writable, outputName, {
+    const result = await writeCombinedPolyToWritable(key, groupRecords, writable, outputName, {
       progressBase,
       progressTotal,
       fallbackFpsValue: getFpsValue?.(),
@@ -333,6 +401,26 @@ export function createPolyCombineController({
       groupLabel,
       onProgress: updateWriteProgress,
     });
+    // 交付自检：写完就把文件读回来核一遍。
+    // "工具说没问题"必须是文件层面的事实，而不是"我打算这么做"。
+    result.deliveryReport = await verifyWrittenPoly(handle, result, {
+      channels: result.channels,
+      sampleRate: result.sampleRate,
+      bitsPerSample: result.bitsPerSample,
+      durationSamples: result.durationSamples,
+      trackNames: result.tracks.map(track => track.name),
+      loudness: result.loudness?.program
+        ? {
+          integrated: result.loudness.program.integrated,
+          truePeak: result.loudness.program.truePeak,
+          range: result.loudness.program.range,
+          maxMomentary: result.loudness.program.maxMomentary,
+          maxShortTerm: result.loudness.program.maxShortTerm,
+        }
+        : null,
+      bextVersion: 2,
+    });
+    return result;
   }
 
   /**
@@ -389,6 +477,8 @@ export function createPolyCombineController({
   async function combinePolyFiles(overrides = {}) {
     const groups = combineEligibleGroups();
     if (!groups.length) throw new Error("没有识别到可合并的分轨 take");
+    // 生产总账的逐 take 条目：批处理收尾时汇总成一份跨 take 的总账。
+    const manifestTakes = [];
     const exportOptions = { ...configuredOptions, ...(await getExportOptions?.(groups) || {}), ...overrides };
     const profile = polyExportProfile(exportOptions.profile || "resolve");
     const knownSourceKeys = new Set(groups.flatMap(([, records]) => records.flatMap(record => Array.from({ length: record.channels }, (_, channel) => `${recordKey(record)}:${channel}`))));
@@ -444,8 +534,18 @@ export function createPolyCombineController({
         try { tracks = applyPolyExportPolicy(combineTrackPlan(records), policy).tracks; }
         catch (error) { log(`Repair WARN: ${shortGroupLabel(key)}: ${error.message}；该 take 不做对齐修复`); continue; }
         try {
+          const takeSampleRate = Number(records[0]?.sampleRate) || 48000;
+          // 波形对齐：LTC 之外的第二条路径。参考声由界面指定；
+          // 没有参考声就不启用，其余情况照旧按原测量对齐。
+          const waveformReference = exportOptions.repair?.waveform?.enabled
+            ? getWaveformReference?.() || null
+            : null;
           const planned = await planRepairsForTracks(tracks, exportOptions.repair.referenceKey || "", {
-            sampleRate: Number(records[0]?.sampleRate) || 48000,
+            sampleRate: takeSampleRate,
+            // 交叉淡化与房间声补白都跟着"对齐修复"这个总开关走，默认关闭。
+            crossfade: exportOptions.repair?.crossfade || null,
+            roomTone: exportOptions.repair?.roomTone || null,
+            waveform: waveformReference ? { enabled: true, reference: waveformReference } : null,
           });
           if (!planned.plans.size) {
             log(`Repair: ${shortGroupLabel(key)} 无需对齐修正（或测不出可靠偏移），按原样合并`);
@@ -459,11 +559,37 @@ export function createPolyCombineController({
             referenceKey: planned.referenceKey,
             outputSamples: planned.outputSamples,
             plans: planned.plans,
+            // 写入层要的是"帧数"，秒数在这里换算——写入层拿不到采样率。
+            crossfade: {
+              enabled: Boolean(exportOptions.repair?.crossfade?.enabled),
+              samples: Math.max(0, Math.round(takeSampleRate * (exportOptions.repair?.crossfade?.seconds ?? ROOM_TONE_DEFAULTS.crossfadeSeconds))),
+            },
+            roomTone: { enabled: Boolean(exportOptions.repair?.roomTone?.enabled) },
           } });
           const summaryText = [...planned.plans.values()].map(plan =>
             `${plan.padSamples ? `补 ${plan.padSamples}` : ""}${plan.skipSamples ? `丢 ${plan.skipSamples}` : ""}${plan.needsResample ? ` 重采样 ${plan.driftRatio.toFixed(6)}` : ""}${plan.polarity === -1 ? " 极性反接" : ""}`
           ).join("；");
-          log(`Repair: ${shortGroupLabel(key)} 以 ${planned.referenceKey} 为基准修正 ${planned.plans.size} 条分轨（${summaryText}）`);
+          // 开了哪几项细化要说出口：用户看到"修正了"却不知道补的是静音还是房间声，
+          // 下次就会按错误的预期去听这条轨。
+          const extras = [];
+          if (exportOptions.repair?.crossfade?.enabled) extras.push("接缝等功率交叉淡化");
+          if (exportOptions.repair?.roomTone?.enabled) extras.push("房间声补白");
+          log(`Repair: ${shortGroupLabel(key)} 以 ${planned.referenceKey} 为基准修正 ${planned.plans.size} 条分轨（${summaryText}${extras.length ? `；${extras.join("、")}` : ""}）`);
+          // 房间声找到没有必须说出口：找不到就退回数字静音，
+          // 用户看到这句才知道"这段得手工补"，而不是以为已经补成房间声了。
+          // 波形匹配的结果要点名：哪条轨是波形给的偏移，哪条没匹上、为什么。
+          const waveformText = (planned.waveformReports || []).map(report =>
+            report.usable
+              ? `${report.key} 波形匹配 ${report.offsetSamples} 采样（一致率 ${(report.confidence?.agreement ?? 0).toFixed(2)}，突出度 ${(report.confidence?.prominence ?? 0).toFixed(2)}）`
+              : `${report.key} 波形没匹上（${report.reason}），仍按原测量对齐`
+          ).join("；");
+          if (waveformText) log(`Waveform: ${shortGroupLabel(key)} ${waveformText}`);
+          const toneText = (planned.roomToneReports || []).map(report =>
+            report.usable
+              ? `${report.key} 找到房间声（${report.startFrame} 帧起，${report.rms.toExponential(2)} RMS）`
+              : `${report.key} 未找到可信房间声（${report.reason}），该处补静音`
+          ).join("；");
+          if (toneText) log(`RoomTone: ${shortGroupLabel(key)} ${toneText}`);
         } catch (error) {
           log(`Repair WARN: ${shortGroupLabel(key)}: ${error?.message || error}；该 take 不做对齐修复`);
         }
@@ -518,6 +644,10 @@ export function createPolyCombineController({
     // 时码阶段就被刷掉的 take 不进写入循环，直接进失败清单，保证"成功 + 失败 = 本批 take 总数"。
     outcomes.push(...timecodeFailures);
     if (timecodeFailures.length) {
+      // 时码不可用而没写出来的 take 同样要进总账：总账的价值就在于说清楚"哪个没交、为什么"。
+      for (const failure of timecodeFailures) {
+        manifestTakes.push(manifestFailureEntry(failure.takeKey, failure.message || "时码不可用"));
+      }
       log(`Combine Poly TIMECODE WARN: ${timecodeFailures.length} 个 take 因时码不可用被跳过，其余 take 继续合并`);
     }
     try {
@@ -532,6 +662,8 @@ export function createPolyCombineController({
           // 预校验失败的 take 刻意不落盘：走输出目录时 getFileHandle({ create: true })
           // 会先建出一个空文件，再在 writeCombinedPolyToWritable 里失败，白留 0 字节文件。
           outcomes.push(takeFailure(key, "validate", precheckFailure));
+          // 没交成的 take 也要进总账：总账的价值就在于说清楚"哪个没交、为什么"。
+          manifestTakes.push(manifestFailureEntry(key, precheckFailure?.message || "预校验没通过"));
         } else {
           try {
             const result = outputDirectory
@@ -551,16 +683,42 @@ export function createPolyCombineController({
                 result.referenceName = outputDirectory ? refName : handle.name;
               } catch (error) { log(`SyncRef WARN: ${error.message}; 主 Poly 已保存`); }
             }
+            // 交付自检的结果随写入函数一起带回来。
+            const deliveryReport = result.deliveryReport || null;
+            if (deliveryReport) {
+              const failed = deliveryReport.checks.filter(check => check.state === "fail");
+              log(failed.length
+                ? `Delivery CHECK FAIL: ${shortGroupLabel(key)} ${failed.map(check => check.label).join("；")}`
+                : `Delivery CHECK: ${shortGroupLabel(key)} ${deliveryReport.summary.pass} 项通过、${deliveryReport.summary.manual} 项待人工确认`);
+            }
             // 清单必须在写 sidecar 之前建好：它要进 _合板说明.txt，不能等面板。
             const checklist = checklistFor(result, {
               profileId: profile.id,
               referenceSourceChannel: exportOptions.referenceSourceChannel,
               takeKey: key,
+              deliveryReport,
             });
             try { if (outputDirectory) await saveSidecars(outputDirectory, result, checklist); else downloadWorkflow(result, checklist); }
             catch (error) { log(`Sync guide WARN: ${error.message}; Poly 已保存，可从 docs/声音合板指南.md 查看说明`); }
             if (result.clippedSamples || result.invalidSamples) log(`Poly WARN: ${result.name}: PCM24 转换削波 ${result.clippedSamples} samples，非有限值 ${result.invalidSamples}；请使用原始 float 或降低增益`);
             results.push(result);
+            manifestTakes.push({
+              takeKey: key,
+              takeLabel: shortGroupLabel(key),
+              outputName: result.name,
+              delivered: true,
+              channels: result.channels,
+              durationSamples: result.durationSamples,
+              sampleRate: result.sampleRate,
+              bitsPerSample: result.bitsPerSample,
+              fps: getFpsValue?.() || "",
+              loudness: result.loudness?.program
+                ? { integrated: result.loudness.program.integrated, truePeak: result.loudness.program.truePeak }
+                : null,
+              health: summarizeHealth(getTakeHealthFindings?.(key)),
+              reasons: [],
+              sidecars: polySidecarNamesFor(result.name),
+            });
             if (checklist) checklists.push({ result, takeKey: key, checklist });
             outcomes.push({ ok: true, takeKey: key, takeLabel: shortGroupLabel(key), name: result.name });
             succeededKeys.add(key);
@@ -570,10 +728,22 @@ export function createPolyCombineController({
             // 让 guarded 去显示这句话，而不是把它算成一次可重试的失败。
             if (error?.name === "AbortError") throw error;
             outcomes.push(takeFailure(key, "write", error));
+            manifestTakes.push(manifestFailureEntry(key, error?.message || "写入失败"));
             log(`Combine Poly WARN: ${shortGroupLabel(key)}: ${error?.message || error}；已跳过这个 take，其余 take 继续`);
           }
         }
         updateWriteProgress("正在合并 Poly…", progressFile, i + 1, groupsToWrite.length);
+      }
+      // 生产总账：把逐 take 的结果汇总成一份跨 take 的总账——
+      // 这次拍摄到底交付了什么、哪个 take 没交、为什么没交。
+      if (outputDirectory && manifestTakes.length) {
+        try {
+          const manifest = buildProductionManifest(manifestTakes, { generatedAt: new Date().toISOString() });
+          await writeProductionManifestFiles(outputDirectory, manifest);
+          log(`Manifest: 生产总账已写（已交付 ${manifest.summary.delivered} / 未交付 ${manifest.summary.skipped}）`);
+        } catch (error) {
+          log(`Manifest WARN: 生产总账没写成：${error?.message || error}`);
+        }
       }
       const summary = summarizeBatchOutcomes(outcomes);
       const stateLabel = choice === "preview" || choice === "ltc" ? "已更改并合并" : "已合并";

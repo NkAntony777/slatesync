@@ -5,7 +5,8 @@
 // 而是钉死三件事：
 // 1. 同一份输入永远得到同一份清单（纯函数、不修改入参）；
 // 2. 5 个方案下的 state 矩阵逐项固定 —— 方案错了就是 bug；
-// 3. 拿不到 take 体检结果时降级为 manual 而不是崩掉（src/take-health.js 尚未接入）。
+// 3. 拿不到 take 体检结果时降级为 manual 而不是崩掉
+//    （take 体检已接进导出流程，这条锁的是"万一没有结果"这条兜底路径）。
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -290,7 +291,7 @@ test("sidecar 文件名由输出文件名推导，且该项必须人工确认", 
   const checklist = buildAcceptanceChecklist(combineResult({ name: "FOLDER01_A001_Poly.WAV" }));
   assert.equal(acceptanceChecklistStateOf(checklist, "sidecars-kept"), "manual");
   const entry = checklist.items.find(item => item.id === "sidecars-kept");
-  assert.deepEqual(entry.evidence.expected, ["FOLDER01_A001_Poly_合板说明.txt", "FOLDER01_A001_Poly_channels.json"]);
+  assert.deepEqual(entry.evidence.expected, ["FOLDER01_A001_Poly_合板说明.txt", "FOLDER01_A001_Poly_channels.json", "FOLDER01_A001_Poly.fcpxml"]);
   assert.ok(entry.detail.includes("_channels.json"));
 });
 

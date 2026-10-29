@@ -7,7 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { measureOffset, measureDrift, planTrackRepair } from "../src/take-repair.js";
+import { measureOffset, measureDrift, planFromMeasurement, planTrackRepair } from "../src/take-repair.js";
 
 const SR = 8000;
 const opts = { sampleRate: SR, analysisSeconds: 1 };
@@ -185,6 +185,38 @@ test("R11 已经对齐的轨不需要任何修复", () => {
   );
   assert.equal(plan.needsResample, false);
   assert.equal(plan.needsOffset, false);
+});
+
+test("R14 亚采样偏移：整数部分照旧，小数部分单独留下来并单独标一档", () => {
+  const frames = SR * 4;
+  // 晚开机 100.37 个采样：GCC-PHAT 的抛物线插值给出的是小数时延。
+  const plan = planFromMeasurement(frames, frames, { offsetSamples: -100.37, ratio: 1, polarity: 1 });
+  assert.ok(plan);
+  assert.equal(plan.leadSamples, 100, "整数部分与改动前一致：仍然是取整后的 lead");
+  assert.ok(Math.abs(plan.leadExact - 100.37) < 1e-9, "精确时延要保留小数");
+  assert.ok(Math.abs(plan.leadFraction - 0.37) < 1e-9, "小数部分要能单独取出来");
+  assert.equal(plan.needsOffset, true);
+  assert.equal(plan.needsSubSample, true, "亚采样修正必须单独标一档，不能混在 needsOffset 里");
+  // 内容区：真实内容在输出帧上占据的区间。
+  assert.equal(plan.contentStart, 100, "头补白就是晚开机的时长");
+  assert.equal(plan.contentEnd, frames);
+  assert.equal(plan.outputSamples, frames);
+
+  // 小到可以当测量噪声的小数不触发亚采样修正——不值得为此重采样整条轨。
+  const tiny = planFromMeasurement(frames, frames, { offsetSamples: -100.02, ratio: 1, polarity: 1 });
+  assert.equal(tiny.needsSubSample, false);
+  assert.ok(Math.abs(tiny.leadFraction - 0.02) < 1e-9);
+});
+
+test("R15 亚采样偏移不会被 needsOffset 的门槛吃掉", () => {
+  const frames = SR * 4;
+  // 纯小数偏移（整数部分为 0）：改动前 Math.round 之后是 0，整条轨被判为"无需修正"。
+  // offsetSamples > 0 表示 target 多出开头（提前开机），所以这里是小数点前移 0.4。
+  const plan = planFromMeasurement(frames, frames, { offsetSamples: 0.4, ratio: 1, polarity: 1 });
+  assert.ok(plan);
+  assert.ok(Math.abs(plan.leadSamples) < 1e-9, "整数部分仍然是 0");
+  assert.ok(Math.abs(plan.leadFraction + 0.4) < 1e-9);
+  assert.equal(plan.needsSubSample, true, "0.4 个采样已经远超测量噪声");
 });
 
 test("R12 畸形输入不抛错", () => {

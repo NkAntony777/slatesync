@@ -185,15 +185,28 @@ export function planFromMeasurement(referenceLength, targetLength, measurement) 
   if (!Number.isFinite(offsetSamples)) return null;
   const ratio = Number.isFinite(measurement.ratio) ? measurement.ratio : 1;
   const lead = -Math.round(offsetSamples);
+  // 亚采样偏移：GCC-PHAT 的抛物线插值给出的是小数时延，Math.round 会把这份精度丢掉。
+  // 这里把精确值单独留下来，写入层用它做线性插值取样——这是"两台设备时钟一致、
+  // 只差零点几拍"这种最常见场景下唯一能拿到亚采样对齐的办法。
+  // 符号约定（与既有测试一致）：offsetSamples > 0 表示 target 多出开头（提前开机），
+  // 所以 lead > 0 表示 target 晚开机、前面要补。
+  const leadExact = -offsetSamples;
+  const leadFraction = leadExact - lead;
   const length = Math.round(targetLength * ratio);
   // target 的有效内容占据输出的 [lead, lead + length) 这段帧区间，
   // 头部 [0, lead) 和尾部 [lead + length, referenceLength) 都没有源数据，需要补静音。
   // 写入层在越界处本来就会写静音，这里的 pad 只是把"要补多少"如实报出来。
   const headPad = Math.max(0, lead);
   const tailPad = Math.max(0, referenceLength - (lead + length));
+  // 内容区（输出帧）。亚采样偏移让内容整体挪动不足一帧，不足以改变区间的归属，
+  // 所以边界仍然按整数 lead 算；小数那部分由写入层在取样时消化掉。
+  const contentStart = headPad;
+  const contentEnd = Math.max(contentStart, Math.min(referenceLength, lead + length));
   return {
     startSamples: Math.round(offsetSamples),
     leadSamples: lead,
+    leadExact,
+    leadFraction,
     driftRatio: ratio,
     polarity: measurement.polarity ?? null,
     // skipSamples 是 lead 的推论，不是另一个独立修正量——wave-combine 取样时
@@ -203,10 +216,16 @@ export function planFromMeasurement(referenceLength, targetLength, measurement) 
     headPadSamples: headPad,
     tailPadSamples: tailPad,
     trimSamples: Math.max(0, lead + length - referenceLength),
+    contentStart,
+    contentEnd,
+    outputSamples: referenceLength,
     // 1e-5 = 0.001%。低于这个量级的是测量噪声不是时钟偏差：拿它去重采样整条轨
     // 只会白白损失音质，却换不来任何对齐收益。
     needsResample: Math.abs(ratio - 1) > 1e-5,
     needsOffset: Math.abs(lead) > 0.5,
+    // 亚采样修正单独一档：它不改变对齐的整数部分，只把小数那部分真正用上。
+    // 0.05 采样（48 kHz 下约 1 微秒）以下视为测量噪声，不值得为此重采样整条轨。
+    needsSubSample: Math.abs(leadFraction) >= 0.05,
   };
 }
 
