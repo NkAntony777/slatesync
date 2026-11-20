@@ -24,6 +24,7 @@
  *     [--emit-clip-list out.json]    把 EDL 派生的 clip_list.v1 另存，便于人工补文件名
  *     [--json]                       把机器可读报告打到 stdout
  *     [--report out.json]            另存机器可读报告
+ *     [--html out.html]              另存单文件自包含 HTML 报告（给人看的那份）
  *     [--frame-tolerance 1]          帧级容差（帧）
  *     [--duration-tolerance 1]       时长容差（帧）
  *     [--max-unverified-ratio 0]     允许的不可判定比例
@@ -59,8 +60,9 @@ import {
   edlToClipList,
   parseCmx3600Edl,
 } from "../src/edl-cmx3600.js";
+import { assertSelfContainedHtml, renderConformHtml } from "../src/conform-report-html.js";
 
-const USAGE = `用法: node scripts/conform-check.mjs <clip-list.json|turnover.edl> --media <dir> [--json] [--report <out.json>]
+const USAGE = `用法: node scripts/conform-check.mjs <clip-list.json|turnover.edl> --media <dir> [--json] [--report <out.json>] [--html <out.html>]
   [--edl <file.edl>] [--edl-fps 25] [--emit-clip-list <out.json>]
   [--frame-tolerance N] [--duration-tolerance N] [--max-unverified-ratio R]
   [--ltc auto|off|on] [--ltc-scan-seconds N] [--quiet]
@@ -76,7 +78,7 @@ class UsageError extends Error {}
 function parseArgs(argv) {
   const flags = new Set(["json", "quiet"]);
   const values = new Set([
-    "media", "report", "frame-tolerance", "duration-tolerance",
+    "media", "report", "html", "frame-tolerance", "duration-tolerance",
     "max-unverified-ratio", "ltc", "ltc-scan-seconds",
     "edl", "edl-fps", "emit-clip-list",
   ]);
@@ -393,6 +395,22 @@ async function main() {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     fs.writeFileSync(outPath, JSON.stringify(report, null, 2) + "\n", "utf8");
   }
+  // HTML 报告与 JSON 报告出自**同一份内存里的 report 对象**，不是两套逻辑：
+  // 渲染是纯函数（report -> HTML 字符串），JSON.stringify 与 renderConformHtml
+  // 只是同一份判定的两种形态。
+  if (args.html) {
+    const outPath = path.resolve(String(args.html));
+    const html = renderConformHtml(report);
+    // 自包含是硬约束：真的扫一遍渲染结果，查不过就不写文件。
+    // 宁可没有报告，也不要一份会偷偷联网、或者带脚本的报告。
+    try {
+      assertSelfContainedHtml(html);
+    } catch (error) {
+      throw new ConformInputError(error.message);
+    }
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, html, "utf8");
+  }
   if (args.json) {
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");
   }
@@ -401,8 +419,15 @@ async function main() {
     process.stdout.write(formatHumanReport(report) + "\n");
     process.stdout.write(`耗时 ${report.run.durationMs} ms（媒体 ${report.media.filesSeen} 个文件 / LTC 扫描 ${report.media.ltcScanned} 个）\n`);
   }
-  if (args.report && !args.quiet && !args.json) {
-    process.stdout.write(`报告已写入 ${displayPath(path.resolve(args.report))}\n`);
+  if (!args.quiet && !args.json) {
+    if (args.report) {
+      process.stdout.write(`报告已写入 ${displayPath(path.resolve(String(args.report)))}\n`);
+    }
+    if (args.html) {
+      process.stdout.write(
+        `HTML 报告已写入 ${displayPath(path.resolve(String(args.html)))}（单文件自包含：无外链、无脚本）\n`,
+      );
+    }
   }
   process.exitCode = report.exitCode;
 }

@@ -855,8 +855,13 @@ export function evaluateClip(claim, index, options = {}) {
       fps: claim.fpsValue,
       dropFrame: Boolean(fps.drop),
       sourceIn: claim.sourceIn.normalized,
+      // 原始标签：清单/EDL 里**原样写的**那个时码字符串。
+      // 它与 normalized 可能不同（例如写法不规范时被归一成别的分隔符），
+      // 纯透传，不参与任何判定——给人核对「我写的」和「工具认的」是不是同一个。
+      sourceInRaw: claim.sourceIn.raw,
       sourceInFrames: claim.sourceIn.frames.toString(),
       sourceOut: claim.sourceOut.normalized,
+      sourceOutRaw: claim.sourceOut.raw,
       sourceOutFrames: claim.sourceOut.frames.toString(),
       spanFrames: (claim.sourceOut.frames - claim.sourceIn.frames).toString(),
       timelineIn: claim.timelineIn ? claim.timelineIn.normalized : null,
@@ -902,11 +907,18 @@ export function summarize(results) {
   };
 }
 
-const EXIT_MEANINGS = Object.freeze({
+/**
+ * 退出码语义表。契约的一部分：0/1/2 各代表什么。
+ * 导出出来是为了让 HTML 报告能原样展示这三条语义（见 src/conform-report-html.js），
+ * 而不是把语义抄成第二份——抄一份就会漂移。
+ */
+export const CONFORM_EXIT_MEANINGS = Object.freeze({
   0: "全部 clip 都有独立证据支撑",
   1: "存在证据矛盾（conflict），或不可判定比例超过阈值",
   2: "输入不可读 / 用法错 / schema 不符",
 });
+
+const EXIT_MEANINGS = CONFORM_EXIT_MEANINGS;
 
 function summarizeLtcUse(results) {
   let scanned = 0;
@@ -971,11 +983,39 @@ export function buildConformReport(input) {
   };
 }
 
+/**
+ * 本次运行生效的门禁档位（failOn）。
+ *
+ * 为什么要有它：退出码 1 只说「没过」，不说「是哪条门禁没过」。
+ * 审片/制片的人要看的正是这个，所以把门禁本身显式化。
+ *
+ * 与 resolveExitCode 同源：两者都从这里算，不存在「报告说一套、退出码说另一套」。
+ * 它只回答「这次用了哪几条门禁、哪条响了」，**不新增任何判定**：
+ * 门禁的触发条件就是 resolveExitCode 原先的那两条，一字未改。
+ */
+export function describeFailOn(summary, maxUnverifiedRatio = DEFAULT_MAX_UNVERIFIED_RATIO) {
+  const conflictFired = summary.conflict > 0;
+  const unverifiedRatioFired = summary.unverifiedRatio > maxUnverifiedRatio;
+  const fired = [];
+  if (conflictFired) fired.push("conflict");
+  if (unverifiedRatioFired) fired.push("unverified-ratio");
+  return {
+    // 两条门禁永远都在场：conflict 那条不可关，比例那条由阈值定量。
+    gates: ["conflict", "unverified-ratio"],
+    // 实际响了哪几条。
+    fired,
+    // 档位标签：none = 全部放行；否则是响了哪条（可能两条都响）。
+    level: fired.length ? fired.join("+") : "none",
+    maxUnverifiedRatio,
+    conflictCount: summary.conflict,
+    unverifiedRatio: summary.unverifiedRatio,
+    exitCode: fired.length ? 1 : 0,
+  };
+}
+
 /** 退出码。1 只在「证据说不了」或「阈值被人显式放宽」之外收紧，不放大。 */
 export function resolveExitCode(summary, maxUnverifiedRatio = DEFAULT_MAX_UNVERIFIED_RATIO) {
-  if (summary.conflict > 0) return 1;
-  if (summary.unverifiedRatio > maxUnverifiedRatio) return 1;
-  return 0;
+  return describeFailOn(summary, maxUnverifiedRatio).exitCode;
 }
 
 // ---------------------------------------------------------------------------

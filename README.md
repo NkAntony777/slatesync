@@ -193,6 +193,26 @@ PCM24 方案不会重采样。Float 超过 0 dBFS 转定点可能削波，导出
 
 完整用法：[命令行交付指南](scripts/README-sync-package.md)。
 
+## 合板校验（CLI）
+
+时间线「连得顺」是最危险的信号——Resolve 在真实 turnover 上 878/882 个片段都能连上，其中 734 个（84%）连错，而且 no error / no warning。所以另有一层**只认证据**的校验：它不连片段、不修时码、不写文件，只回答「这条 clip 真的连到了它声称的那条 take 吗」，并给出 `supported` / `unverified` / `conflict` 三态与一条可复算的证据链。
+
+```bash
+# 生成合成素材（全部 _stub）
+node scripts/make-conform-fixtures.mjs --out test/artifacts/conform-stub
+
+# 校验 + 出报告：终端摘要 + 机器可读 JSON + 单文件自包含 HTML
+node scripts/conform-check.mjs test/artifacts/conform-stub/clip-list.mixed.json \
+  --media test/artifacts/conform-stub/media \
+  --json --report conform.json --html conform.html
+```
+
+HTML 报告是**一个文件**：样式内联，无外链、无脚本，双击可开、可当邮件附件发给对方。里面包含总览（三态计数 + 单列的不可判定比例 + `failOn` 档位 + 退出码 0/1/2 的语义 + 媒体目录扫描情况）、判不了的条目单列、逐条 clip 的证据链（`kind` / `strength` / `status` / `expected` / `measured` / `deltaSeconds` / `deltaFrames` / `toleranceFrames` / `coverage` / `detail` / `readBy`）、命中的候选与没被选的替代项、以及建议。
+
+`--html` 与 `--json` / `--report` 可同时产出，三者出自同一份判定结果。退出码：`0` 全部有独立证据 / `1` 存在 conflict 或不可判定比例超阈值 / `2` 输入不可读、用法错或 schema 不符。
+
+契约与已知局限：[conform_check.v1 契约](docs/conform-check-v1.md)。
+
 ## DaVinci Resolve 合板要点
 
 - 在 **Clip Attributes → Audio** 检查节目通道；需要独立麦克风轨时按 Mono 离散映射。
@@ -369,8 +389,13 @@ src/
   take-health.js                   合并前 take 体检（23 条 code 契约）
   acceptance-checklist.js          导出演算清单（14 项）与文本渲染
   sync-workflow.js                 中文交付说明和通道清单
+  conform-check.js                 合板校验层（三态 + 证据链，纯函数）
+  conform-report-html.js           单文件自包含 HTML 报告渲染（纯函数）
+  edl-cmx3600.js                   CMX3600 EDL 解析（只读公开约定）
 scripts/
   export-sync-package.mjs          本地命令行导出
+  conform-check.mjs                合板校验 CLI（--json / --report / --html）
+  make-conform-fixtures.mjs        合成校验素材（文件名带 _stub）
   build-single-file.mjs            单文件 HTML 构建（需要 esbuild）
   resolve/                         Resolve 合成素材与 API 验证
 test/
@@ -401,6 +426,7 @@ SlateSync 基于 [xnpeter / Audio TC Change](https://github.com/xnpeter/Audio-TC
 - **Run as a single file:** download `bwf-timecode-singlefile-*.html` from Releases and double-click it. No Python, no local server, no npm. All features (timecode write-back, Poly export) are preserved, because `file://` is a secure context in Chrome/Edge. Build it yourself with `npm run build:single`.
 - **Run the web app:** clone the complete repository, run `python -m http.server 8765 --bind 127.0.0.1`, then open `http://127.0.0.1:8765/` in Chrome or Edge. The repository's `index.html` is **not** a standalone distributable — use the single-file build when you need one self-contained HTML file.
 - **Use export presets:** `node scripts/export-sync-package.mjs --help`. Advanced preset/channel controls are available through the CLI/data API, not yet as complete web UI controls.
+- **Verify a conform:** `node scripts/conform-check.mjs clips.json --media ./media --json --report conform.json --html conform.html` — evidence-only verification with a three-state verdict (supported / unverified / conflict) and a single-file self-contained HTML report (inline styles, no external resources, no scripts).
 - **Validated:** synthetic-fixture import and timecode/waveform sync in DaVinci Resolve 20.3.3.10 on Windows. This is not certification for all footage or other applications.
 - **Protect your originals:** in-place metadata writes modify source WAVs; muting source LTC audio cannot be undone by the metadata undo button.
 - **License:** MIT, derived from Audio TC Change with upstream attribution preserved.

@@ -82,6 +82,10 @@ CMX3600 EDL 的适配器已实现（`src/edl-cmx3600.js`，见 §9）；AAF / OT
 
 ## 2. 输出：报告与证据链
 
+同一份判定结果有三种输出形态：**机器可读 JSON**（`--json` / `--report`）、
+**终端摘要**（默认）、**单文件自包含 HTML**（`--html`，见 §10）。
+三者出自同一份内存里的 report 对象，不存在「JSON 说的」和「HTML 说的」两套结论。
+
 ```jsonc
 {
   "contract": "conform_check.v1",
@@ -110,8 +114,8 @@ CMX3600 EDL 的适配器已实现（`src/edl-cmx3600.js`，见 §9）；AAF / OT
   "verdict": "conflict",
   "reasons": ["embedded-range-mismatch", "embedded-span-mismatch"],
   "claim": { "name": "A002_T001_stub.WAV", "fps": "25", "dropFrame": false,
-             "sourceIn": "10:00:00:00", "sourceInFrames": "900000",
-             "sourceOut": "10:00:04:00", "sourceOutFrames": "900600",
+             "sourceIn": "10:00:00:00", "sourceInRaw": "10:00:00:00", "sourceInFrames": "900000",
+             "sourceOut": "10:00:04:00", "sourceOutRaw": "10:00:04:00", "sourceOutFrames": "900600",
              "spanFrames": "600", "timelineIn": null, "timelineOut": null },
   "evidence": [
     {
@@ -152,6 +156,10 @@ CMX3600 EDL 的适配器已实现（`src/edl-cmx3600.js`，见 §9）；AAF / OT
 | `coverage` | 区间类证据的定位：`exact` / `inside` / `before-file` / `after-file` / `unknown` |
 | `detail` | 中文一句话结论 |
 | `readBy` | **复算路径**：读哪个字节、走哪个模块、和什么比 |
+
+`clip.claim` 里另有 `sourceInRaw` / `sourceOutRaw`：**纯透传**的原始时码标签
+（清单/EDL 里原样写的那个字符串），与规范化后的 `sourceIn` / `sourceOut` 并列给出，
+方便人核对「我写的」和「工具认的」是不是同一个时码。它们不参与任何判定（见 §10.6）。
 
 `deltaFrames` 与 `deltaSeconds` 同时给，是因为跨帧率时只有秒是可比的；
 而人看帧数更快。两者都是精确有理数（BigInt 分数）展开，不是浮点。
@@ -259,6 +267,10 @@ node scripts/conform-check.mjs test/artifacts/conform-stub/clip-list.all-support
 
 # CI：机器可读报告
 node scripts/conform-check.mjs clips.json --media ./media --json --report conform.json
+
+# 给人看的那份：单文件自包含 HTML（可与 --json/--report 同时产出）
+node scripts/conform-check.mjs clips.json --media ./media \
+  --json --report conform.json --html conform.html
 ```
 
 ## 8. 已知局限（这个工具在哪些情况下给不出判定）
@@ -449,7 +461,91 @@ node scripts/conform-check.mjs test/fixtures/edl/turnover_2997df.edl \
 > （如 [postmicrotools EDL inspector](https://www.postmicrotools.com/edl) 的说明页），
 > 以及 SMPTE ST 12-1 的时码定义。**未参考任何闭源软件的实现，也未复制任何代码。**
 
-## 10. 变更规则
+## 10. HTML 报告（给人看的那份）
+
+### 10.1 为什么要有这一份
+
+JSON 与终端摘要都是给机器和命令行看的。审片、制片、制片管理的人不读 JSON——
+他们要回答的是三个问题：
+
+1. 这批里**有几条我们判不了**（`unverified`）？
+2. **哪几条连错了**（`conflict`）？证据是什么？
+3. **该拿哪个文件替代**？
+
+所以校验层除了机器可读输出，还产出一份**单文件自包含 HTML**：
+双击能开、能当邮件附件发给对方、不联网、不执行脚本。
+
+### 10.2 用法
+
+```bash
+# 一条命令同时产出三样：终端摘要 + 机器可读 JSON + 单文件 HTML
+node scripts/conform-check.mjs clips.json --media ./media \
+  --json --report conform.json --html conform.html
+```
+
+`--html <out.html>` 与 `--json` / `--report` **并存、可同时产出**，
+三者出自同一份内存里的 report 对象（见 §10.4）。
+
+### 10.3 报告里有哪些块
+
+| 块 | 内容 |
+|---|---|
+| **总览** | clip 总数、`supported`/`unverified`/`conflict` 三态计数、**单列的 `unverifiedRatio`**、本次用的 `failOn` 档位、**退出码 0/1/2 的语义**（写清语义而不只是数字）、媒体目录扫描情况（文件数 / 可读 / 读不动 / 带内嵌起始时码 / LTC 扫描与解出 / 非 WAV 忽略数 / take 分组数） |
+| **判不了专区** | `unverified` 的条数与占比单独成块（黄色、醒目），并逐条列出 clip id、文件名与原因码。**unverified ≠ 错**：它既不是通过也不是失败，是「我不知道」 |
+| **跳过核对 / 媒体缺席** | 没有锁定到具体媒体文件的条目单列，写明原因码（`media-not-found` / `no-filename-in-edl` / `ambiguous-filename`）与说明。每行仍带着它自己的三态结论 |
+| **逐条 clip** | 每条 clip 一段：`id`、源文件名、reel、帧率与 drop 标记、`sourceIn`/`sourceOut`（**规范化时码 + 原始标签 + 帧号**）、时间线入出、源跨度、备注 |
+| **证据链** | 每条证据一行：`kind`、`strength`、`status`（pass/fail/missing/na）、`expected`、`measured`、`deltaSeconds`、`deltaFrames`、`toleranceFrames`、`coverage`（exact/inside/before-file/after-file）、`detail`、`readBy`（读哪个字节、走哪个模块、和什么比） |
+| **候选与替代项** | `candidates`：命中了哪些候选文件（采样率 / 声道 / 位深 / bext / iXML / LTC 状态）；`alternates`：还有哪些**没被选**的文件覆盖了清单声称的源区间（文件起止 + 距声称入点多少帧）——这是人做决定时最需要的部分 |
+| **建议** | `suggestions` 逐条列出（例如「媒体目录里 X 覆盖了清单声称的源区间」） |
+| **页脚** | 契约名、渲染器名、生成时间、合成素材提示 |
+
+### 10.4 同源：JSON 与 HTML 是同一份 report 渲染出来的
+
+- 渲染器是 `src/conform-report-html.js` 里的**纯函数** `renderConformHtml(report) -> string`：
+  不读盘、不碰 DOM、不 import `node:*`。
+- CLI 只构建**一份** report 对象，`--report`（JSON）与 `--html`（HTML）都从这一份渲染，
+  不存在两套逻辑。测试里有一条专门盯这件事：把 CLI 写出的 JSON 读回来重新渲染，
+  必须与 CLI 写出的 HTML **逐字节一致**。
+- 报告**不引入任何新判定**：只呈现 report 里已有的内容。分组、配色、排版都是呈现，
+  `supported`/`unverified`/`conflict` 三态与退出码语义一字未改。
+  另有一条测试：HTML 里每条 clip 的结论必须与 JSON 逐条一致。
+
+### 10.5 自包含是硬约束（不是「写的时候小心一点」）
+
+- 样式**全部内联**在 `<style>` 里；不引 CDN、不引外部字体/图片、不写 `<script>`。
+  校验报告是给别人看的静态件，脚本只会带来 XSS 面。
+- 渲染结果里**不得出现 `http://` 或 `https://` 任何子串**：这份文件会被当邮件附件
+  发到别人机器上，多一个外链就意味着收件人的机器会偷偷联网。
+- 这条不靠自觉：`assertSelfContainedHtml(html)` 会**真的扫一遍**渲染结果
+  （`http(s)://` / `<script>` / `<link>` / `<img>` / `src=` / `url()` / `@import`），
+  CLI 在写文件前调用它，**查不过就不写文件**——宁可没有报告，也不要一份会联网的报告。
+- `test/conform-html-report.test.mjs` 把上面这些写成静态断言（出现次数必须 = 0），
+  并用一次「故意改坏渲染 ⇒ 同一套断言必须失败」的实测证明这些断言不是摆设。
+
+### 10.6 本次对契约的两处改动（透明记录）
+
+1. `clip.claim` 新增 `sourceInRaw` / `sourceOutRaw`：**纯透传**，
+   就是清单/EDL 里原样写的那个时码字符串，给人核对「我写的」和「工具认的」
+   是不是同一个时码。**不参与任何判定**：三态、退出码、证据链一个字节都没变，
+   契约版本仍是 `conform_check.v1`。
+2. `src/conform-check.js` 导出 `CONFORM_EXIT_MEANINGS`（原先是模块内私有的）
+   与新函数 `describeFailOn(summary, maxUnverifiedRatio)`：
+   后者把「这次用了哪几条门禁、哪条响了」显式化，`resolveExitCode` 改为**委托**给它
+   算退出码——门禁与退出码从此只有一份逻辑，不会出现「报告说一套、退出码说另一套」。
+
+### 10.7 已知局限
+
+1. **HTML 报告不增加信息量**：它是 report 的另一种呈现，不是新的判定层。
+   想看原始数据请看 `--report` 出的 JSON。
+2. **不做交互**：没有折叠、没有筛选、没有搜索。证据链是全量展开的，
+   clip 多的时候文件会很长（这是刻意的：审片时要能一路滚到底，不漏看）。
+3. **只在浏览器里保证排版**：CSS 用系统字体栈与 CSS 变量，老浏览器可能略有差异；
+   打印样式已做（`@media print`）。
+4. **不含任何外部资源**：这是硬约束的代价——没有图表库、没有图标字体、
+   没有语法高亮主题。时码与帧号用等宽字体呈现，不做彩色高亮。
+5. **合成素材未覆盖真实拍摄素材**：fixtures 全部 `_stub`，
+   HTML 报告顶部会明确标出这一点。
+## 11. 变更规则
 
 - 加字段 / 改语义 / 改退出码 = 升版到 `conform_check.v2`。
 - 加一种证据 kind、放宽容差默认值，都必须在这份文档里写清理由与影响面。
