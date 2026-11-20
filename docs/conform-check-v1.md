@@ -417,8 +417,8 @@ node scripts/conform-check.mjs --edl test/fixtures/edl/turnover_25fps.edl \
 node scripts/conform-check.mjs out/from-edl.json \
   --media test/artifacts/conform-stub/media --json
 
-# 4) 丢帧表
-node scripts/conform-check.mjs test/fixtures/edl/dropframe_2997df.edl \
+# 4) 丢帧表（同一条表里同时有 reel AX、dissolve、分号时码、注释，形状最接近真实）
+node scripts/conform-check.mjs test/fixtures/edl/turnover_2997df.edl \
   --media test/artifacts/conform-stub/media
 ```
 

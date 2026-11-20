@@ -121,6 +121,51 @@ test("丢帧：00:00:59;28 / 00:01:00;04 按 29.97df 解成第 1798 / 1802 帧�
   assert.equal(edlToClipList(parsed).fps, "29.97df");
 });
 
+test("真实形状 + 丢帧同一份表：reel AX / 3 条事件 / dissolve / 分号时码 / 注释，帧号逐条手算相符", () => {
+  const parsed = parseFixture("turnover_2997df.edl");
+  assert.equal(parsed.fpsValue, "29.97df");
+  assert.equal(parsed.fpsSource, "default-dropframe");
+  assert.equal(parsed.fcm, "DROP FRAME");
+  assert.equal(parsed.counts.events, 3);
+  assert.equal(parsed.counts.audioEvents, 3);
+  assert.equal(parsed.counts.videoOnlyEventsExcluded, 0);
+  assert.equal(parsed.counts.dissolves, 1);
+  assert.equal(parsed.counts.comments, 7);
+  assert.equal(parsed.counts.namesResolved, 3);
+  assert.deepEqual(parsed.audioEvents.map((event) => event.reel), ["AX", "AX", "AX"]);
+
+  // 手算（29.97df，每分钟丢 2 帧，每 10 分钟只丢 9*2 帧）：
+  //   001 10:00:00;10 -> 36000*30+10 - 2*(600-60) = 1078930
+  //       10:00:04;00 -> 36004*30     - 1080        = 1079040（跨度 110）
+  //   002 10:00:04;00 -> 1079040 ; 10:00:06;00 -> 36006*30 - 1080 = 1079100（跨度 60）
+  //   003 11:00:00;18 -> 11*3600*30+18 - 2*(660-66) = 1186830
+  //       11:00:02;28 -> 39602*30+28  - 1188       = 1186900（跨度 70）
+  const frames = [
+    ["001", "1078930", "1079040", 110],
+    ["002", "1079040", "1079100", 60],
+    ["003", "1186830", "1186900", 70],
+  ];
+  for (const [index, item] of frames.entries()) {
+    const [id, inFrames, outFrames, span] = item;
+    const event = parsed.audioEvents[index];
+    assert.equal(event.id, id);
+    assert.equal(event.sourceIn.frames.toString(), inFrames, id + " 源入帧号");
+    assert.equal(event.sourceOut.frames.toString(), outFrames, id + " 源出帧号");
+    assert.equal((event.sourceOut.frames - event.sourceIn.frames).toString(), String(span));
+    // 源跨度与录制跨度相等（真实 cut/dissolve 都如此），否则 timeline-span 会判自相矛盾。
+    assert.equal((event.recordOut.frames - event.recordIn.frames).toString(), String(span));
+  }
+
+  // dissolve：24 帧，帧数不超过事件跨度，且 note 里留痕。
+  const dissolve = parsed.audioEvents.find((event) => event.id === "002");
+  assert.equal(dissolve.dissolveFrames, 24);
+  // 002 在源文件第 8 行（1-based，L7 是空行）；行号供人直接跳转，不用 0-based。
+  assert.deepEqual(parsed.dissolves, [{ id: "002", line: 8, frames: 24, reel: "AX" }]);
+  assert.match(edlToClipList(parsed).clips[1].note, /trans=D;dissolveFrames=24/);
+  // 规范形态保留分号：丢帧标签不能用冒号写。
+  assert.match(parsed.audioEvents[0].sourceIn.normalized, /;10$/);
+});
+
 test("注释行全保留：* LOC 之类不参与命名的注释也不丢，且能同时带 FROM/TO 两条名字", () => {
   const parsed = parseFixture("turnover_25fps.edl");
   assert.equal(parsed.counts.comments, 8);
