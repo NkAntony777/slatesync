@@ -9,10 +9,19 @@
  * 退出码（契约的一部分，不可随意改）：
  *   0  全部 clip 都有独立证据支撑
  *   1  存在 conflict，或 unverified 比例超过 --max-unverified-ratio
- *   2  输入不可读 / 用法错 / schema 不符
+ *   2  输入不可读 / 用法错 / schema 不符 / EDL 解析失败（不认识的记录、字段数不对、
+ *      时码非法、只有视频轨没有音频轨……任何一种都不静默跳过）
+ *
+ * 输入可以是两种：本项目自定义的剪辑清单（clip_list.v1 JSON），或剪辑室直接给的
+ * CMX3600 EDL。EDL 会在内存里投影成 clip_list.v1 再走同一套判定，判定层不知道
+ * 输入来自哪种格式——这样格式层出错不会污染「三态」的语义。
  *
  * 用法：
  *   node scripts/conform-check.mjs clips.json --media ./media
+ *   node scripts/conform-check.mjs turnover.edl --media ./media        （按扩展名识别）
+ *   node scripts/conform-check.mjs --edl turnover.edl --media ./media  （显式指定）
+ *     [--edl-fps 25]                 EDL 帧率（FCM 只声明丢帧/非丢帧，不声明速率）
+ *     [--emit-clip-list out.json]    把 EDL 派生的 clip_list.v1 另存，便于人工补文件名
  *     [--json]                       把机器可读报告打到 stdout
  *     [--report out.json]            另存机器可读报告
  *     [--frame-tolerance 1]          帧级容差（帧）
@@ -42,14 +51,21 @@ import {
   DEFAULT_MAX_UNVERIFIED_RATIO,
   buildConformReport,
   formatHumanReport,
+  normalizeClipList,
   parseClipList,
 } from "../src/conform-check.js";
+import {
+  EdlParseError,
+  edlToClipList,
+  parseCmx3600Edl,
+} from "../src/edl-cmx3600.js";
 
-const USAGE = `用法: node scripts/conform-check.mjs <clip-list.json> --media <dir> [--json] [--report <out.json>]
+const USAGE = `用法: node scripts/conform-check.mjs <clip-list.json|turnover.edl> --media <dir> [--json] [--report <out.json>]
+  [--edl <file.edl>] [--edl-fps 25] [--emit-clip-list <out.json>]
   [--frame-tolerance N] [--duration-tolerance N] [--max-unverified-ratio R]
   [--ltc auto|off|on] [--ltc-scan-seconds N] [--quiet]
 
-退出码: 0 全部有独立证据 / 1 存在 conflict 或不可判定比例超阈值 / 2 输入不可读或用法错`;
+退出码: 0 全部有独立证据 / 1 存在 conflict 或不可判定比例超阈值 / 2 输入不可读、用法错或 EDL 解析失败`;
 
 // 与 scripts/export-sync-package.mjs 同一套自动 LTC 候选帧率，避免两处口径漂移。
 const LTC_FPS_CANDIDATES = ["23.976", "24", "25", "29.97", "29.97df", "30", "48", "50", "59.94", "59.94df", "60"];
@@ -62,6 +78,7 @@ function parseArgs(argv) {
   const values = new Set([
     "media", "report", "frame-tolerance", "duration-tolerance",
     "max-unverified-ratio", "ltc", "ltc-scan-seconds",
+    "edl", "edl-fps", "emit-clip-list",
   ]);
   const args = { positional: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -209,13 +226,56 @@ async function decodeProbeLtc(probe, { scanSeconds }) {
   }
 }
 
+const FPS_SOURCE_LABEL = Object.freeze({
+  cli: "--edl-fps 指定",
+  "default-dropframe": "时码用分号，按 29.97df 推定",
+  default: "未声明，默认 25",
+});
+
+/** EDL 溯源摘要。人看的，机器看 report.run.source。 */
+function formatEdlSource(source) {
+  const lines = [];
+  lines.push(
+    `EDL 源：${source.file || "(未命名)"}（${source.parser}）`
+    + (source.title ? ` TITLE ${source.title}` : "")
+    + (source.fcm ? ` / FCM ${source.fcm}` : " / 无 FCM 行"),
+  );
+  lines.push(
+    `帧率 ${source.fps}（${FPS_SOURCE_LABEL[source.fpsSource] || source.fpsSource}）`
+    + ` / 事件 ${source.events} 条：音频 ${source.audioEvents}`
+    + `、仅视频已排除 ${source.videoOnlyEventsExcluded}`
+    + `、dissolve ${source.dissolves}、注释 ${source.comments} 条`,
+  );
+  lines.push(
+    `文件名：从注释解析 ${source.namesResolved} 条 / 未解析 ${source.namesUnresolved} 条`
+    + (source.namesUnresolved ? "（未解析的判 unverified，不猜文件名）" : ""),
+  );
+  if (source.videoOnlyEventsExcluded) {
+    lines.push(`已排除的仅视频事件：${source.videoOnlyEventIds.join(", ")}（不参与判定，仅计数）`);
+  }
+  return lines.join("\n");
+}
+
 async function main() {
   const startedAt = Date.now();
   const args = parseArgs(process.argv.slice(2));
-  const listPath = args.positional[0];
-  if (!listPath) throw new UsageError("缺少剪辑清单路径（第一个位置参数）");
   if (args.positional.length > 1) throw new UsageError(`多余的参数：${args.positional.slice(1).join(" ")}`);
+  let listPath = args.positional[0] || null;
+  // EDL 入口：--edl 显式给，或位置参数本身是 .edl（按扩展名识别，方便直接拖文件）。
+  let edlPath = args.edl === undefined ? null : String(args.edl);
+  if (edlPath && listPath) {
+    throw new UsageError(
+      `--edl 与位置参数不能同时给：${listPath}。EDL 会派生清单，两份输入互相覆盖`,
+    );
+  }
+  if (!edlPath && listPath && /\.edl$/i.test(listPath)) {
+    edlPath = listPath;
+    listPath = null;
+  }
+  if (!edlPath && !listPath) throw new UsageError("缺少输入：剪辑清单路径，或 --edl <file.edl>");
   if (!args.media) throw new UsageError("缺少 --media <媒体目录>");
+  if (!edlPath && args["edl-fps"] !== undefined) throw new UsageError("--edl-fps 只在 EDL 输入下有意义");
+  if (!edlPath && args["emit-clip-list"] !== undefined) throw new UsageError("--emit-clip-list 只在 EDL 输入下有意义");
   const ltcPolicy = args.ltc === undefined ? DEFAULT_LTC_POLICY : String(args.ltc);
   if (!["auto", "off", "on"].includes(ltcPolicy)) throw new UsageError(`--ltc 只能是 auto / off / on，收到 ${args.ltc}`);
   const options = {
@@ -235,13 +295,65 @@ async function main() {
   if (!fs.existsSync(mediaDir) || !fs.statSync(mediaDir).isDirectory()) {
     throw new ConformInputError(`媒体目录不存在或不是目录：${args.media}`);
   }
-  let listText;
-  try {
-    listText = fs.readFileSync(path.resolve(listPath), "utf8");
-  } catch (error) {
-    throw new ConformInputError(`读不到剪辑清单：${listPath}（${error.message}）`);
+  // 输入 → clip_list.v1。两条路径在这里汇合，判定层与报告层完全不知道差别。
+  let clipList;
+  let edlSource = null;
+  if (edlPath) {
+    let edlText;
+    try {
+      edlText = fs.readFileSync(path.resolve(edlPath), "utf8");
+    } catch (error) {
+      throw new ConformInputError(`读不到 EDL：${edlPath}（${error.message}）`);
+    }
+    const parsed = parseCmx3600Edl(edlText, { fps: args["edl-fps"], fileName: path.basename(edlPath) });
+    const draft = edlToClipList(parsed);
+    if (args["emit-clip-list"]) {
+      const outPath = path.resolve(String(args["emit-clip-list"]));
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, JSON.stringify(draft, null, 2) + "\n", "utf8");
+      process.stderr.write(`已写出 EDL 派生的剪辑清单：${displayPath(outPath)}（name 为空的条目需要人工补文件名）\n`);
+    }
+    // allowUnresolvedName：EDL 里没有文件名的条目留空。
+    // 只对 EDL 派生路径放宽；直接读 clip_list 文件仍按原 schema 拒绝空 name（退出码 2）。
+    clipList = normalizeClipList(draft, { allowUnresolvedName: true });
+    edlSource = {
+      kind: "edl-cmx3600",
+      parser: parsed.parser,
+      file: parsed.fileName,
+      title: parsed.title,
+      fcm: parsed.fcm,
+      fps: parsed.fpsValue,
+      fpsSource: parsed.fpsSource,
+      events: parsed.counts.events,
+      audioEvents: parsed.counts.audioEvents,
+      videoOnlyEventsExcluded: parsed.counts.videoOnlyEventsExcluded,
+      videoOnlyEventIds: parsed.counts.videoOnlyEventIds,
+      dissolves: parsed.counts.dissolves,
+      dissolveEvents: parsed.dissolves,
+      comments: parsed.counts.comments,
+      namesResolved: parsed.counts.namesResolved,
+      namesUnresolved: parsed.counts.namesUnresolved,
+      duplicateEventNumbers: parsed.counts.duplicateEventNumbers,
+      eventLines: parsed.events.map((event) => ({
+        id: event.id,
+        line: event.line,
+        track: event.track,
+        transition: event.transition,
+        dissolveFrames: event.dissolveFrames,
+        reel: event.reel,
+        name: event.name || null,
+        nameSource: event.nameSource,
+      })),
+    };
+  } else {
+    let listText;
+    try {
+      listText = fs.readFileSync(path.resolve(listPath), "utf8");
+    } catch (error) {
+      throw new ConformInputError(`读不到剪辑清单：${listPath}（${error.message}）`);
+    }
+    clipList = parseClipList(listText);
   }
-  const clipList = parseClipList(listText);
 
   const { waveFiles, ignored } = collectMediaFiles(mediaDir);
   const probes = [];
@@ -272,6 +384,9 @@ async function main() {
     ignoredNonWaveFiles: ignored.length,
     takesDetected: takeGroupCount(detectTakeGroupKeys(probes.filter((probe) => probe.record).map((probe) => probe.record))),
   };
+  // run 是 CLI 的溯源块（不属于三态判定契约）：只在 EDL 输入时多一个 source 字段，
+  // clip_list 输入的输出与改动前逐字节一致。
+  if (edlSource) report.run.source = edlSource;
 
   if (args.report) {
     const outPath = path.resolve(args.report);
@@ -282,6 +397,7 @@ async function main() {
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");
   }
   if (!args.quiet && !args.json) {
+    if (edlSource) process.stdout.write(formatEdlSource(edlSource) + "\n\n");
     process.stdout.write(formatHumanReport(report) + "\n");
     process.stdout.write(`耗时 ${report.run.durationMs} ms（媒体 ${report.media.filesSeen} 个文件 / LTC 扫描 ${report.media.ltcScanned} 个）\n`);
   }
@@ -292,6 +408,17 @@ async function main() {
 }
 
 main().catch((error) => {
+  // EDL 解析失败是「输入问题」，退出码 2，并且必须逐条给行号与原因：
+  // 只说「解析失败」会让人对着几百行 EDL 猜哪里错了。
+  if (error instanceof EdlParseError) {
+    process.stderr.write(error.message + "（退出码 2）\n");
+    for (const issue of error.issues) {
+      process.stderr.write("  " + (issue.line > 0 ? "行 " + issue.line : "文件") + "：" + issue.message + "\n");
+      if (issue.text) process.stderr.write("        原文：" + issue.text + "\n");
+    }
+    process.exitCode = 2;
+    return;
+  }
   const known = error instanceof UsageError || error instanceof ConformInputError;
   process.stderr.write((known ? "" : "内部错误：") + error.message + "\n");
   if (error instanceof UsageError) process.stderr.write(USAGE + "\n");

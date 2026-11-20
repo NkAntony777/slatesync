@@ -198,13 +198,30 @@ function secondsFromTimecodeAt(timecode, fps) {
  * 严格拒绝未知字段：清单里多写一个字段（拼错 tolerance / sourceTC 之类）会让
  * 校验静默漏掉一项，所以 v1 直接判 schema 不符（退出码 2）。
  */
-export function parseClipList(text) {
+export function parseClipList(text, options = {}) {
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (error) {
     throw new ConformInputError(`剪辑清单不是合法 JSON：${error.message}`);
   }
+  return normalizeClipList(raw, options);
+}
+
+/**
+ * 对象形态的剪辑清单校验。parseClipList 是「读文本 + 校验」，本函数是「校验」那一半，
+ * 供格式层（src/edl-cmx3600.js）在内存里投影出清单后直接复用同一套规则，
+ * 不必把派生清单写成字再读回来。
+ *
+ * options.allowUnresolvedName（默认 false）
+ *   EDL 常常只给卷号、不给文件名（没有 * FROM CLIP NAME 之类注释）。这时清单里 name
+ *   留空串才是诚实的——猜一个文件名会让校验层去验错文件。空 name 的 clip 在判定层
+ *   记 no-filename-in-edl 并判 unverified，不会被当成通过。
+ *   这个开关只放宽「空串」这一种取值：缺字段、非字符串、以及所有其他 schema 规则
+ *   与默认模式完全一致。默认关闭，所以手写 clip_list 里写空 name 仍然退出码 2。
+ */
+export function normalizeClipList(raw, options = {}) {
+  const allowUnresolvedName = options.allowUnresolvedName === true;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new ConformInputError("剪辑清单必须是一个 JSON 对象");
   }
@@ -244,7 +261,11 @@ export function parseClipList(text) {
     if (!id) throw new ConformInputError(`${label}.id 必填且为非空字符串`);
     if (seenIds.has(id)) throw new ConformInputError(`${label}.id 重复：${id}`);
     seenIds.add(id);
-    if (typeof entry.name !== "string" || !entry.name.trim()) {
+    if (typeof entry.name !== "string") {
+      throw new ConformInputError(`${label}.name 必须是字符串（媒体目录里的文件名）`);
+    }
+    const name = entry.name.trim();
+    if (!name && !allowUnresolvedName) {
       throw new ConformInputError(`${label}.name 必填且为非空字符串（媒体目录里的文件名）`);
     }
     const fpsValue = entry.fps === undefined ? defaultFpsValue : String(entry.fps);
@@ -272,7 +293,7 @@ export function parseClipList(text) {
     }
     clips.push({
       id,
-      name: entry.name.trim(),
+      name,
       reel: typeof entry.reel === "string" && entry.reel.trim() ? entry.reel.trim() : null,
       note: typeof entry.note === "string" ? entry.note : null,
       fps,
@@ -411,18 +432,23 @@ export function evaluateClip(claim, index, options = {}) {
 
   // ---- 1. 标识类证据（自我声明，不是独立见证） --------------------------
   if (lookup.status === "none") {
+    // 空 name 与「名字查不到」必须分开说：前者是来源格式（EDL）没给文件名，
+    // 后者是给了名字但目录里没有。混成一句会让人去翻媒体目录找根本不存在的线索。
+    const hasName = Boolean(claim.name);
     evidence.push(evidenceRow(
       "identifier.filename",
       EVIDENCE_STRENGTH.IDENTIFIER,
       EVIDENCE_STATUS.MISSING,
-      { name: claim.name },
+      { name: claim.name || null },
       { matchedFiles: [] },
       {
-        detail: "媒体目录里没有这个名字的文件",
+        detail: hasName
+          ? "媒体目录里没有这个名字的文件"
+          : "清单没有给出文件名（来源格式里没有 FROM CLIP NAME / CLIP NAME / SOURCE FILE 注释）",
         readBy: "调用方扫描媒体目录后按小写文件名精确匹配",
       },
     ));
-    reasons.push("media-not-found");
+    reasons.push(hasName ? "media-not-found" : "no-filename-in-edl");
   } else if (lookup.status === "ambiguous") {
     evidence.push(evidenceRow(
       "identifier.filename",

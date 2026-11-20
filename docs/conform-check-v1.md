@@ -5,7 +5,8 @@
 >
 > 版本：`conform_check.v1`（输出 JSON 的 `contract` 字段）
 > 实现：`src/conform-check.js`（纯判定逻辑）+ `scripts/conform-check.mjs`（CLI/媒体扫描）
-> 状态：v1 只消费本项目自定义的最小剪辑清单，**格式层（EDL / AAF / OTIO / FCPXML）待接**。
+> 状态：判定层 `conform_check.v1` 不变；输入支持本项目自定义剪辑清单 `clip_list.v1`
+> **与 CMX3600 EDL（`--edl`，见 §9）**。AAF / OTIO / FCPXML 仍未接。
 
 ## 0. 为什么需要这一层
 
@@ -28,7 +29,9 @@
 - **不做**商业软件的逆向工程：不解析 Resolve 的 `Project.db`，不读任何闭源工程格式。
   本层只依据公开标准（EBU Tech 3285 bext、iXML 字段约定、SMPTE ST 12-1 timecode/LTC）
   和文件自身的字节。
-- **不做**格式解析：v1 不读 EDL / AAF / OTIO / FCPXML。剪辑清单是自定义 JSON。
+- **只读一种外部格式**：CMX3600 EDL（`src/edl-cmx3600.js` + `--edl`，见 §9）。
+  AAF / OTIO / FCPXML / 任何闭源工程文件都不读。EDL 只按公开的 CMX3600 约定解析，
+  不逆向任何商业软件。
 - **不改**任何源素材：CLI 全程只读。
 - 零运行时依赖：只用 `node:*` 与仓库内已有模块。
 
@@ -74,8 +77,8 @@ JSON only（CSV 留给格式层）。最小形态：
 `sourceTC` 会让校验静默少验一项，而「少验一项」在报告里看起来和「验过且通过」一样。
 宁可退出码 2 让人改，也不要出一个看着完整的空壳报告。
 
-**格式层待接口**：将来接 EDL/AAF/OTIO 时，由适配器把外部格式投影成本 schema，
-判定层不变。v1 不实现任何解析器。
+**格式层接口**：外部格式由适配器投影成本 schema，判定层不变。
+CMX3600 EDL 的适配器已实现（`src/edl-cmx3600.js`，见 §9）；AAF / OTIO / FCPXML 仍未实现。
 
 ## 2. 输出：报告与证据链
 
@@ -280,7 +283,173 @@ node scripts/conform-check.mjs clips.json --media ./media --json --report confor
 9. **合成素材未覆盖真实拍摄素材的长尾**：现场噪声、时钟漂移、变速、多声道
    LTC 混音等场景需要真实素材回归（当前 fixtures 全部 `_stub`）。
 
-## 9. 变更规则
+## 9. 格式层：CMX3600 EDL（`--edl`）
+
+### 9.1 这一层解决什么
+
+剪辑室不会给 JSON。他们给的是 `.edl`。判定层已经能回答「这条 clip 连对了没有」，
+但它之前只吃自定义清单，所以真实项目里要先有人手抄一遍——手抄就没人跑，
+跑不起来的校验等于没有校验。这一节把第一块格式层补上：**直接吃 CMX3600 EDL**。
+
+解析器在 `src/edl-cmx3600.js`，纯函数、零依赖（只 import `./timecode.js`；有测试守着这条）。
+它只读文本，不读盘、不逆向任何商业软件；CMX3600 的行为按公开约定实现（事件行八/九字段、
+`TITLE`/`FCM` 头部、`*` 注释、`D` 带帧数、丢帧时码用分号）。
+
+### 9.2 支持的子集（明写到这里，避免被当成「支持 EDL」）
+
+| 元素 | 形态 | 说明 |
+|---|---|---|
+| `TITLE` | `TITLE:   NAME` | 只记录，进 `run.source.title`；不参与判定 |
+| `FCM` | `FCM: DROP FRAME` / `FCM: NON-DROP FRAME`（也认 `NDF` / `DF`） | 只声明丢帧与否；速率不在这行（见 §9.4） |
+| 事件行（cut） | `NNN  REEL  TRACK  C  srcIn srcOut recIn recOut` | 8 个字段 |
+| 事件行（dissolve） | `NNN  REEL  TRACK  D  NNN  srcIn srcOut recIn recOut` | 9 个字段，`NNN` 为转场帧数（> 0） |
+| 轨道记号 | `V` / `A` / `AA` / `AB` / `A1`..`A9`，可 `/` 组合（如 `A2/V`） | 含 `A` 即视为有音频；纯 `V` 见 §9.4 |
+| 时码（非丢帧） | `HH:MM:SS:FF` | 合法性（帧数 < 额定帧率）由 `src/timecode.js` 判 |
+| 时码（丢帧） | `HH:MM:SS;FF` | 分号即丢帧；不存在的时间码（非 10 分钟整点跳帧位）会被拒 |
+| 注释行 | `* ...` | **全部保留**，挂在它前面的事件上（无前序事件则挂文件头） |
+| 空行 | —— | 结构性分隔，跳过不算「丢数据」 |
+
+注释里能被当成**真实文件名**的键（只认这些，其余一律不用）：
+`FROM CLIP NAME` > `CLIP NAME` > `TO CLIP NAME` > `SOURCE FILE` / `FROM FILE`。
+值里若是路径，只取 basename。**解析不到就留空，不猜。**
+
+### 9.3 明确不支持（遇到就报错 + 退出码 2，不静默跳过）
+
+| 元素 | 为什么不支持 |
+|---|---|
+| `W` / `K` / `KB` / `KO` / `KI` / `X` 转场 | 只实现 cut 与 dissolve；把 wipe 当硬切会让源跨度看起来对、实际错 |
+| `M2` / `M1` 变速备忘 | 没实现速度换算；忽略它会把变速段的源跨度算错 |
+| 其他任何非空、非注释、非头部、非事件的行 | 例如 `EFFECTS NAME IS ...`：不认识就说，不猜 |
+| 只有视频轨（没有任何 `A*` 事件）的 EDL | 本层只验音频身份；拿这种表跑只会得到一片 unverified，属于用错工具，直接报 unsupported |
+| AAF / OTIO / FCPXML / XML | 未实现（本层不做） |
+
+### 9.4 映射规则（EDL 事件 → `clip_list.v1`）
+
+| EDL | clip_list.v1 | 规则 |
+|---|---|---|
+| `reel` | `reel` | 原样；只作 identifier 级弱匹配 |
+| 事件号 `NNN` | `id` | 原样（保留前导零）。**重复事件号加 `#2`/`#3` 后缀**，因为 `clip_list.v1` 要求 id 唯一（dissolve 常把同一事件号写两行）。`note` 里留 `dupOf=` |
+| `srcIn` / `srcOut` | `sourceIn` / `sourceOut` | 写成**该帧率下的规范形态**（`framesToTimecode` 回显）：丢帧仍带分号，非丢帧带冒号 |
+| `recIn` / `recOut` | `timelineIn` / `timelineOut` | 让判定层能查「清单自身是否自相矛盾」（`identifier.timeline-span`） |
+| 注释里的文件名 | `name` | 解析不到 → `name: ""` + `note` 里 `nameUnresolved`，判定层记 `no-filename-in-edl` 判 **unverified**（不是 supported） |
+| 转场与帧数 | `note` | `note: "edl:evt=004;track=A;trans=D;dissolveFrames=24;nameFrom=FROM_CLIP_NAME"`。**不往 clip 上加字段**，schema 不变 |
+| 纯 `V` 事件 | 不进 `clips` | **明确排除并计数**：`run.source.videoOnlyEventsExcluded` / `videoOnlyEventIds`。不静默丢：数量与事件号都在报告里 |
+
+**dissolve 怎么处理（重要）**：每个事件行各成一条 clip，**不合并**前后两行，也不重算转场几何。
+理由：判定层只关心「这条 clip 声称的源区间是什么」，转场几何属于时间线结构，不是身份证据。
+唯一做的是自检：`dissolveFrames` 必须 > 0，且不超过该事件的源跨度/录制跨度，否则报错——
+这类输入多半是列表被截断或列错位，放过去就会用错的跨度去比对。
+
+**帧率怎么定（`fpsSource` 会写进报告，不藏假设）**：
+
+1. 给了 `--edl-fps` → 用它（`fpsSource: cli`）。若时码里有分号而它非丢帧 → 报错并提示改传 `29.97df`；
+   25 / 24 这类速率根本没有丢帧变体，也会明确说不支持。
+2. 没给参数、时码里有分号 → `29.97df`（`fpsSource: default-dropframe`）。
+3. 其余 → `25`（`fpsSource: default`，与 `clip_list.v1` 默认一致）。
+
+`FCM` 只说丢帧/非丢帧、不说速率，所以这三条是**确定规则**而不是猜：选择会打印在人类摘要里，
+也写在 `run.source.fps` / `run.source.fpsSource`。以下两种矛盾一律报错，不替你挑一种解释：
+
+- `FCM: NON-DROP FRAME` 但时码里有分号；
+- `FCM: DROP FRAME` 但**没有任何**时码用分号（若确认是非丢帧，用 `--edl-fps 29.97` 显式声明）；
+- 同一份表里混用 `;` 与 `:`。
+
+### 9.5 严格性：这些情况一律退出码 2
+
+| 情况 | 报什么 |
+|---|---|
+| 字段数不对 | `行 4：字段数不对：cut 事件需要 8 个字段，实际 7 个` |
+| 时码非法 | `行 4：时码非法："10:00:00:99"（帧数必须小于 25；当前帧率 25）` |
+| 不认识的记录类型 | `行 4：无法识别的记录类型：首字段 "EFFECTS" 不是事件号` |
+| 不认识的轨道/转场 | `行 4：不认识的轨道记号："X"` / `行 4：不支持的转场类型 W（wipe（划像））` |
+| `M2` 变速备忘 | `行 4：不支持变速/冻结备忘行（M2）：…` |
+| 倒置入出 | `行 4：源出必须晚于源入（… -> …）` |
+| dissolve 帧数超跨度 | `行 4：dissolve 帧数 100 超过该事件的源跨度 25 帧` |
+| 没有音频轨事件 | `这份 EDL 只有视频轨事件（V），没有任何音频轨事件` |
+
+一次解析会**收集全部问题**再退出，每条都带行号与原文，所以坏表不用一条一条试。
+错误走 stderr，stdout 不产生半份报告——半份报告比没有报告更危险。
+
+### 9.6 报告里的 EDL 溯源（`run.source`）
+
+只在 `--edl` 输入时出现（`clip_list` 输入的输出与本文首版逐字节一致）：
+
+```jsonc
+"run": {
+  "ignoredNonWaveFiles": 1,
+  "takesDetected": 4,
+  "source": {
+    "kind": "edl-cmx3600", "parser": "cmx3600.v1", "file": "turnover_25fps.edl",
+    "title": "SLATESYNC TURNOVER TEST", "fcm": "NON-DROP FRAME",
+    "fps": "25", "fpsSource": "default",
+    "events": 5, "audioEvents": 4,
+    "videoOnlyEventsExcluded": 1, "videoOnlyEventIds": ["001"],
+    "dissolves": 1, "dissolveEvents": [{ "id": "004", "line": 15, "frames": 24, "reel": "A002" }],
+    "comments": 8, "namesResolved": 4, "namesUnresolved": 0, "duplicateEventNumbers": 0,
+    "eventLines": [{ "id": "002", "line": 8, "track": "A", "transition": "C",
+                     "dissolveFrames": null, "reel": "A001", "name": "A001_T001_stub.WAV",
+                     "nameSource": "FROM CLIP NAME" }]
+  }
+}
+```
+
+`run` 是 CLI 的溯源块，**不属于三态判定契约**：`contract` / `summary` / `clips[].verdict` /
+`exitCode` 的语义与取值规则完全没动。`eventLines` 给出每个事件的行号，报告里的每条 clip
+都能回到 EDL 的某一行。
+
+### 9.7 用法
+
+```bash
+# 生成合成素材（全部 _stub）
+node scripts/make-conform-fixtures.mjs --out test/artifacts/conform-stub
+
+# 1) EDL 直接判定（按扩展名识别；等价于 --edl）
+node scripts/conform-check.mjs test/fixtures/edl/turnover_25fps.edl \
+  --media test/artifacts/conform-stub/media
+
+# 2) 显式 --edl + 显式帧率 + 机器可读报告
+node scripts/conform-check.mjs --edl test/fixtures/edl/turnover_25fps.edl \
+  --media test/artifacts/conform-stub/media --edl-fps 25 --json --report conform.json
+
+# 3) 完整链路：EDL → clip_list.v1（落盘）→ 再跑该清单
+node scripts/conform-check.mjs --edl test/fixtures/edl/turnover_25fps.edl \
+  --media test/artifacts/conform-stub/media --emit-clip-list out/from-edl.json --quiet
+node scripts/conform-check.mjs out/from-edl.json \
+  --media test/artifacts/conform-stub/media --json
+
+# 4) 丢帧表（同一条表里同时有 reel AX、dissolve、分号时码、注释，形状最接近真实）
+node scripts/conform-check.mjs test/fixtures/edl/turnover_2997df.edl \
+  --media test/artifacts/conform-stub/media
+```
+
+`--emit-clip-list` 写出的清单里，`name` 为空串的条目需要人工补文件名；
+**直接读 `clip_list` 文件时空 name 仍然退出码 2**（schema 没有被 EDL 路径顺手放宽）。
+
+### 9.8 已知局限：什么样的真实 EDL 会解析失败
+
+这一节同样是契约的一部分。下面每一条都是**故意**的失败，不是 bug：
+
+1. **含 wipe / key 的表**：`W` / `K` 一律退出码 2。真实成片表里转场很常见，
+   所以本层现在只能吃「cut + dissolve」的表。需要 wipe 的话，先在 NLE 里把转场渲染掉再导出。
+2. **含变速（`M2`）的表**：退出码 2。速度换算没实现，忽略它会把源跨度算错。
+3. **`FCM` 与分号不一致的表**：退出码 2。这类表要么是导出器 bug，要么是人工改过；
+   猜错丢帧会让整条时间线差几分钟。用 `--edl-fps` 显式声明可以绕过 FCM 的裁决。
+4. **没有 `* FROM CLIP NAME` 的表**：能解析，但每条 clip 都判 `unverified`
+   （`no-filename-in-edl`）。EDL 的卷号不是文件名，拿卷号当文件名会去验错文件。
+5. **正是视频轨的表**（只交付画面 EDL）：退出码 2。本层验的是音频素材身份。
+6. **事件号重复但没有 dissolve 语义的表**：会被加上 `#2` 后缀。序号本身不参与判定，
+   但报告里的 id 与原始事件号不完全一致，`run.source.eventLines[].line` 可用于回查。
+7. **列宽靠空格对齐、字段里有空格**的表：按空白切分，所以卷号/轨道里不能有空格。
+   真实 EDL 不会这样，但手工编辑过的会。
+8. **24 小时以上的时码、绝对帧号写法、AAF 风格的时间线**：不支持，会报时码非法。
+9. **CMX3600 的其他方言**（File32/File128 的额外头、GVC 的扩展备忘）：未覆盖；
+   不认识的行一律报错而不是忽略，所以会失败得很明确。
+
+> 参考的公开说明：CMX3600 事件行/转场/`FCM`/分号丢帧的公开描述
+> （如 [postmicrotools EDL inspector](https://www.postmicrotools.com/edl) 的说明页），
+> 以及 SMPTE ST 12-1 的时码定义。**未参考任何闭源软件的实现，也未复制任何代码。**
+
+## 10. 变更规则
 
 - 加字段 / 改语义 / 改退出码 = 升版到 `conform_check.v2`。
 - 加一种证据 kind、放宽容差默认值，都必须在这份文档里写清理由与影响面。
