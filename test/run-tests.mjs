@@ -1,6 +1,5 @@
 // End-to-end test: synthesize Zoom-style WAV takes (one LTC track), decode, diagnose.
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { File } from "node:buffer";
 
@@ -11,6 +10,9 @@ import { detectTakeGroupKeys, recordsByGroupFor, groupKeyFor, takeGroupCount } f
 import { buildTakeDiagnostics } from "../src/ltc-diagnostics.js";
 import { writeCombinedPolyToWritable } from "../src/wave-combine.js";
 import { encodeLtcAudio, encodeVoiceLike, writeWavPcm16 } from "./ltc-encode.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 启动清扫 + 退出必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { bootstrapTempDirs, cleanupTempDirs, makeTempDir } from "./tmp-store.mjs";
 
 class MemWritable {
   constructor() { this.data = new Uint8Array(0); this.closed = false; }
@@ -43,7 +45,8 @@ class MemWritable {
 }
 
 const SR = 48000;
-const dir = mkdtempSync(join(tmpdir(), "ltc-test-"));
+bootstrapTempDirs();
+const dir = makeTempDir("ltc-test-");
 let pass = 0, fail = 0;
 const check = (name, cond, extra = "") => {
   if (cond) { pass++; console.log(`  ok  ${name}`); }
@@ -308,4 +311,6 @@ console.log(`test dir: ${dir}\n`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
+// 临时目录必删：显式清一次（process.exit 也会触发 exit 钩子，双保险）。
+cleanupTempDirs("all");
 process.exit(fail ? 1 : 0);

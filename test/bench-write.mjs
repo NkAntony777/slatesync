@@ -103,10 +103,37 @@ const stub = (extra = {}) => ({
 });
 
 // ---------------------------------------------------------------------------
+// 临时目录纪律（2026-11-24 修，见 docs/测试临时目录泄漏修复.md）
+// ---------------------------------------------------------------------------
+// 临时目录落本仓内 .tmp/（D 盘），登记在册，结束必删——不再往 C 盘系统 TEMP 丢。
+// 跨版本对比时本文件可能被复制到旧代码树的 test/ 下运行；那边没有 tmp-store.mjs，
+// 此时退回系统 TEMP，并按目录清单在结束时显式删除（不留残留）。
+const tmpStore = await import("./tmp-store.mjs").catch(() => null);
+const benchDirs = [];
+
+function makeBenchDir(prefix) {
+  const dir = tmpStore
+    ? tmpStore.makeTempDir(prefix, { scope: "file" })
+    : mkdtempSync(join(tmpdir(), prefix));
+  benchDirs.push(dir);
+  return dir;
+}
+
+function cleanupBenchDirs() {
+  if (tmpStore) {
+    tmpStore.cleanupTempDirs("all");
+    return;
+  }
+  for (const dir of benchDirs) rmSync(dir, { recursive: true, force: true });
+}
+
+if (tmpStore) tmpStore.bootstrapTempDirs();
+
+// ---------------------------------------------------------------------------
 // 素材
 // ---------------------------------------------------------------------------
 function makeFixtures() {
-  const srcDir = mkdtempSync(join(tmpdir(), "bench-write-src-"));
+  const srcDir = makeBenchDir("bench-write-src-");
   const frames = Math.floor((FILE_MB * 1024 * 1024) / 2); // mono 16-bit
   const records = [];
   for (let i = 0; i < FILE_COUNT; i++) {
@@ -197,7 +224,7 @@ async function scenarioSaveAs(srcDir, names) {
     return;
   }
   const records = await scanRecords(srcDir, names);
-  const outDir = mkdtempSync(join(tmpdir(), "bench-write-out-"));
+  const outDir = makeBenchDir("bench-write-out-");
   const controller = makeController(records, records.map(previewOf), {
     confirmWriteChanges: async () => "save-as",
     pickSaveAsTargets: async (items) => {
@@ -252,3 +279,6 @@ for (const [name] of SCENARIOS) {
   );
   console.log(`   各轮: ${results.get(name).map(v => v.toFixed(0)).join(", ")} ms`);
 }
+
+// 临时目录必删（不留残留）。
+cleanupBenchDirs();

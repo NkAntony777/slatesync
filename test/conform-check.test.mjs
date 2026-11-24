@@ -7,8 +7,7 @@
 // 未在真实拍摄素材上验证。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,6 +22,9 @@ import {
 } from "../src/conform-check.js";
 import { framesToSamples, parseFps, timecodeToFrames } from "../src/timecode.js";
 import { writeConformFixtures } from "../scripts/make-conform-fixtures.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 四道钩子必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { makeTempDir } from "./tmp-helper.mjs";
 
 const RATE = 48000;
 const CLI = fileURLToPath(new URL("../scripts/conform-check.mjs", import.meta.url));
@@ -328,7 +330,8 @@ test("不可判定比例阈值是活的：ratio 0.5 时默认 0 判 1，放宽�
 // 5. CLI 端到端（真实退出码 + 真实 JSON 报告）
 // ---------------------------------------------------------------------------
 
-const root = mkdtempSync(path.join(tmpdir(), "slatesync-conform-"));
+// 夹具目录整个测试文件共用 ⇒ scope:"file"（由 after 钩子删，afterEach 不动）
+const root = makeTempDir("slatesync-conform-", { scope: "file" });
 const fixtures = writeConformFixtures(root);
 const mediaDir = fixtures.mediaDir;
 

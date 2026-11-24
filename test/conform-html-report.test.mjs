@@ -14,14 +14,16 @@
 // 未在真实拍摄素材上验证。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assertSelfContainedHtml, renderConformHtml } from "../src/conform-report-html.js";
 import { writeConformFixtures } from "../scripts/make-conform-fixtures.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 四道钩子必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { makeTempDir } from "./tmp-helper.mjs";
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CLI = fileURLToPath(new URL("../scripts/conform-check.mjs", import.meta.url));
@@ -32,7 +34,8 @@ function countOf(haystack, needle) {
   return haystack.split(needle).length - 1;
 }
 
-const root = mkdtempSync(path.join(tmpdir(), "slatesync-conform-html-"));
+// 夹具目录整个测试文件共用 ⇒ scope:"file"（由 after 钩子删，afterEach 不动）
+const root = makeTempDir("slatesync-conform-html-", { scope: "file" });
 const fixtures = writeConformFixtures(root);
 const mediaDir = fixtures.mediaDir;
 const jsonOut = path.join(root, "report.json");

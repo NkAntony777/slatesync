@@ -14,11 +14,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { createLoudnessMeter } from "../src/loudness.js";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 四道钩子必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { makeTempFile } from "./tmp-helper.mjs";
 
 const SR = 48000;
 const TOLERANCE = { integrated: 0.1, truePeakUp: 0.2, truePeakDown: 0.4, range: 1.0 };
@@ -278,7 +280,7 @@ const CASES = [
 ];
 
 test("ffmpeg 的真峰值读数含重采样冷启动过冲，本实现量的是真实峰", { skip }, () => {
-  const file = path.join(os.tmpdir(), "slatesync-loudness-coldstart.wav");
+  const file = makeTempFile("slatesync-loudness-", "-coldstart.wav");
   try {
     const hz = 16000;
     const amplitude = 0.5;
@@ -304,7 +306,7 @@ test("ffmpeg 的真峰值读数含重采样冷启动过冲，本实现量的是�
 });
 
 test("响度与 ffmpeg ebur128 一致（EBU Tech 3341 / 3342 容差）", { skip }, () => {
-  const file = path.join(os.tmpdir(), "slatesync-loudness-crosscheck.wav");
+  const file = makeTempFile("slatesync-loudness-", "-crosscheck.wav");
   const report = [];
   try {
     for (const item of CASES) {

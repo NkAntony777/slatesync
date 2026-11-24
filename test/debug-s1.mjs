@@ -1,14 +1,17 @@
 import { join } from "node:path";
 import { File } from "node:buffer";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { scanWave, readDataView } from "../src/wave.js";
 import { createLtcDecoder } from "../src/ltc-decoder.js";
 import { parseFps } from "../src/timecode.js";
 import { encodeLtcAudio, writeWavPcm16 } from "./ltc-encode.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 退出必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { bootstrapTempDirs, cleanupTempDirs, makeTempDir } from "./tmp-store.mjs";
 
 const SR = 48000;
-const dir = mkdtempSync(join(tmpdir(), "ltc-dbg-"));
+bootstrapTempDirs();
+const dir = makeTempDir("ltc-dbg-");
 const ltc = encodeLtcAudio({ sampleRate: SR, fps: 25, startTc: "01:23:45:00", durationSeconds: 8, amplitude: 0.4, startDelaySeconds: 1.5 });
 writeWavPcm16(join(dir, "ltc.wav"), [ltc.data], SR);
 const file = new File([readFileSync(join(dir, "ltc.wav"))], "ltc.wav");
@@ -28,3 +31,6 @@ console.log("expected frame starts:");
 for (const [tc, pos] of [...ltc.frameStarts.entries()].slice(0, 8)) console.log(`  ${tc} @ ${pos}`);
 const last = [...ltc.frameStarts.entries()].at(-1);
 console.log(`  ... last ${last[0]} @ ${last[1]}`);
+
+// 临时目录必删（不留残留）。
+cleanupTempDirs("all");

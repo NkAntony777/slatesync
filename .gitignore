@@ -29,6 +29,9 @@ __pycache__/
 *.pfx
 *.p12
 
+# Test temp workspace (in-repo temp dirs; see docs/测试临时目录泄漏修复.md)
+/.tmp/
+
 # OS/editor metadata
 .DS_Store
 Thumbs.db

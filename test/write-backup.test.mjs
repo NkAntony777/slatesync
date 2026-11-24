@@ -7,8 +7,7 @@
 // 所以 abort() 不会留下半截文件。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, renameSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync, rmSync, renameSync } from "node:fs";
 import { join, basename } from "node:path";
 
 import { scanWave, readDataView } from "../src/wave.js";
@@ -24,6 +23,9 @@ import {
   BACKUP_PENDING_SUFFIX,
 } from "../src/time-reference-write-controller.js";
 import { encodeLtcAudio, encodeVoiceLike, writeWavPcm16 } from "./ltc-encode.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 四道钩子必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { makeTempDir } from "./tmp-helper.mjs";
 
 const SR = 48000;
 // 与 index.html 的 WAV_SUFFIX 保持一致：备份必须不能被导入器当成一个 take。
@@ -205,7 +207,9 @@ async function largeRecordIn(dir, name, { withDirectory = true, frames = 25_000_
   });
 }
 
-const tempDir = () => mkdtempSync(join(tmpdir(), "slatesync-backup-"));
+// 临时目录不再落系统 TEMP（C 盘）：改落本仓内 .tmp/，登记在册，
+// 由 tmp-helper.mjs 的四道钩子（afterEach / after / exit / SIGINT·SIGTERM·SIGHUP）必删。
+const tempDir = () => makeTempDir("slatesync-backup-");
 
 async function ltcStereoRecord(dir, name) {
   const ltc = encodeLtcAudio({ sampleRate: SR, fps: 25, startTc: "01:23:45:00", durationSeconds: 2, amplitude: 0.5 });

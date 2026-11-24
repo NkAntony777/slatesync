@@ -5,8 +5,7 @@
 // 原文件从头到尾不被打开写入，新文件字节级一致且已写入新时码。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, renameSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync, rmSync, renameSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 
 import { scanWave, readDataView } from "../src/wave.js";
@@ -18,6 +17,9 @@ import {
 } from "../src/time-reference-write-controller.js";
 import { createConfirmFlows } from "../src/confirm-flows.js";
 import { encodeLtcAudio, encodeVoiceLike, writeWavPcm16 } from "./ltc-encode.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 四道钩子必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { makeTempDir } from "./tmp-helper.mjs";
 
 const SR = 48000;
 
@@ -171,7 +173,8 @@ async function recordIn(dir, name, { channels, sampleRate = SR, withDirectory = 
   });
 }
 
-const tempDir = () => mkdtempSync(join(tmpdir(), "slatesync-saveas-"));
+// 临时目录不再落系统 TEMP（C 盘）：改落本仓内 .tmp/，登记在册，必删。
+const tempDir = () => makeTempDir("slatesync-saveas-");
 
 async function ltcStereoRecord(dir, name) {
   const ltc = encodeLtcAudio({ sampleRate: SR, fps: 25, startTc: "01:23:45:00", durationSeconds: 2, amplitude: 0.5 });

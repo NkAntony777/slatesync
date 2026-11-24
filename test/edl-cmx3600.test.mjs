@@ -9,8 +9,7 @@
 // EDL 是手写的合成表，未在真实剪辑室的表上验证。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -25,6 +24,9 @@ import {
 } from "../src/edl-cmx3600.js";
 import { ConformInputError, normalizeClipList, parseClipList } from "../src/conform-check.js";
 import { writeConformFixtures } from "../scripts/make-conform-fixtures.mjs";
+// 临时目录纪律：落本仓内 .tmp/（D 盘）+ 四道钩子必删
+// —— 见 docs/测试临时目录泄漏修复.md
+import { makeTempDir } from "./tmp-helper.mjs";
 
 const CLI = fileURLToPath(new URL("../scripts/conform-check.mjs", import.meta.url));
 const EDL_DIR = fileURLToPath(new URL("./fixtures/edl/", import.meta.url));
@@ -332,7 +334,8 @@ test("解析器是纯函数：不 import 任何 node: 内置模块（浏览器�
 // 4. CLI 端到端：--edl → clip_list → 三态报告
 // ---------------------------------------------------------------------------
 
-const root = mkdtempSync(path.join(tmpdir(), "slatesync-edl-"));
+// 夹具目录整个测试文件共用 ⇒ scope:"file"（由 after 钩子删，afterEach 不动）
+const root = makeTempDir("slatesync-edl-", { scope: "file" });
 const fixtures = writeConformFixtures(root);
 const mediaDir = fixtures.mediaDir;
 
